@@ -11,14 +11,14 @@ export interface GoogleUser {
 
 interface AuthContextType {
   user: GoogleUser | null;
-  login: (credential: string) => void;
+  login: (credential: string) => Promise<void>;
   logout: () => void;
   loading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
-  login: () => {},
+  login: async () => {},
   logout: () => {},
   loading: true,
 });

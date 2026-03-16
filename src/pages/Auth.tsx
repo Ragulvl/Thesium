@@ -12,9 +12,9 @@ export default function Auth() {
   const { login } = useGoogleAuth();
   const { error, success } = useToast();
 
-  const handleGoogleSuccess = (credentialResponse: CredentialResponse) => {
+  const handleGoogleSuccess = async (credentialResponse: CredentialResponse) => {
     if (credentialResponse.credential) {
-      login(credentialResponse.credential);
+      await login(credentialResponse.credential);
       success("Successfully signed in with Google!", "Authentication");
       navigate('/dashboard');
     }
