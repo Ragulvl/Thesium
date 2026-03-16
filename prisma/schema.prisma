@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  picture   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  theses    Thesis[]
+}
+
+model Thesis {
+  id               String   @id @default(uuid())
+  title            String
+  field            String   @default("General")
+  targetPages      Int      @default(60)
+  researchQuestion String?
+  date             String   @default("")
+  progress         Int      @default(0)
+  status           String   @default("draft") // "draft", "review", etc
+  wordCount        Int      @default(0)
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sections         Section[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Section {
+  dbId        String   @id @default(uuid())
+  id          String   // e.g. 'abstract', 'introduction'
+  label       String   // e.g. 'Abstract', 'Introduction'
+  content     String   @default("")
+  wordCount   Int      @default(0)
+  order       Int      // used for sorting
+  thesisId    String
+  thesis      Thesis   @relation(fields: [thesisId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([thesisId, id])
+}
