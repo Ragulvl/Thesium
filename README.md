@@ -98,7 +98,7 @@ Follow these instructions to provision a local development environment.
    ```bash
    npm run dev
    ```
-   *Frontend Client:* `http://localhost:5173` | *Backend API:* `http://localhost:3001`
+   *Frontend Client:* `http://localhost:10000` | *Backend API:* `http://localhost:3001`
 
 ## 🛡️ Best Practices & Quality Assurance
 

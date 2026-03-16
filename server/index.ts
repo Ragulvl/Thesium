@@ -15,7 +15,7 @@ const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY || "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",
   defaultHeaders: {
-    "HTTP-Referer": "http://localhost:5173", // Optional, for including your app on openrouter.ai rankings.
+    "HTTP-Referer": "http://localhost:10000", // Optional, for including your app on openrouter.ai rankings.
     "X-Title": "Thesium", // Optional. Shows in rankings on openrouter.ai.
   }
 });
