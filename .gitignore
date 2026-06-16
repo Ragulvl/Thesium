@@ -29,3 +29,4 @@ dist-ssr
 
 /src/generated/prisma
 typecheck_errors*.txt
+coverage/
