@@ -1,9 +1,38 @@
 // Image generation service — uses LLM to generate SVG diagrams for thesis figures.
 // Security fix: LLM-returned SVG is now sanitized before storage to remove
 // script tags, event handlers, external references (SSRF), and foreignObject.
-import { callModelWithRetry } from './openRouter.js';
+import { aiRouter } from './ai/index.js';
+import type { AIResponse, PipelineStage } from './ai/index.js';
+import { callModelWithRetry } from './openRouter.js';   // Kept for USE_AI_ROUTER=false rollback
 import { MODELS } from '../config/models.js';
 import { logger } from '../config/logger.js';
+import { env } from '../config/env.js';
+
+// ── AI Router Toggle ─────────────────────────────────────────────────
+const USE_AI_ROUTER = env.USE_AI_ROUTER !== 'false';
+
+async function callAI(
+  stage: PipelineStage,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  callLogger: any,
+): Promise<AIResponse> {
+  if (USE_AI_ROUTER) {
+    return aiRouter.generate({ stage, systemPrompt, userPrompt }, callLogger);
+  }
+  const res = await callModelWithRetry(model, systemPrompt, userPrompt, callLogger);
+  return {
+    content: res.content,
+    provider: 'openrouter',
+    model,
+    durationMs: res.durationMs,
+    promptTokens: 0,
+    outputTokens: 0,
+    totalTokens: res.totalTokens,
+    estimatedCostUsd: res.estimatedCostUsd,
+  };
+}
 
 export interface GeneratedImage {
   base64: string;       // base64-encoded sanitized SVG
@@ -55,7 +84,7 @@ export async function generateSubsectionImage(
   content: string,
 ): Promise<GeneratedImage | null> {
   try {
-    const res = await callModelWithRetry(MODELS.FAST,
+    const res = await callAI('image', MODELS.FAST,
       `You are an academic figure designer. Your job is to decide IF a diagram is needed, and only then generate one.
 
 DECISION RULES — be very selective:

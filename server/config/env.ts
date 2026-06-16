@@ -19,6 +19,15 @@ const envSchema = z.object({
   // ── AI ─────────────────────────────────────────────────────────
   OPENROUTER_API_KEY: z.string().min(1),
   OPENROUTER_API_KEYS: z.string().optional(), // comma-separated keys for rotation
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_API_KEYS: z.string().optional(),     // comma-separated keys for rotation
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_API_KEYS: z.string().optional(),       // comma-separated keys for rotation
+
+  // ── AI Router Toggle ───────────────────────────────────────────
+  // Set to "false" to bypass AIRouter and use legacy openRouter.ts directly.
+  // Safety rollback mechanism — remove after multi-provider is stable.
+  USE_AI_ROUTER: z.string().default('true'),
 
   // ── Auth ────────────────────────────────────────────────────────
   // Use GOOGLE_CLIENT_ID for server-side verification.

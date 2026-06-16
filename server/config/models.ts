@@ -11,6 +11,20 @@ export const MODELS = {
   DRAFTER: process.env.MODEL_DRAFTER || 'stepfun/step-3.5-flash:free',
 } as const;
 
+/** Per-provider model selections — consumed by AI stage router. */
+export const PROVIDER_MODELS = {
+  gemini: {
+    fast: 'gemini-2.0-flash',
+    lite: 'gemini-2.0-flash-lite',
+    pro:  'gemini-2.5-pro',
+  },
+  groq: {
+    fast:      'llama-3.3-70b-versatile',
+    lite:      'llama-3.1-8b-instant',
+    reasoning: 'deepseek-r1-distill-llama-70b',
+  },
+} as const;
+
 /** Per-LLM-call timeout in ms — free-tier models can take 60-90s */
 export const LLM_CALL_TIMEOUT_MS = Number(process.env.LLM_CALL_TIMEOUT_MS) || 120_000;
 

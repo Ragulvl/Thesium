@@ -8,8 +8,37 @@
 // The report is stored in thesis.auditReport (Json?) and returned for display.
 
 import { prisma } from '../config/prisma.js';
-import { callModelWithRetry } from './openRouter.js';
+import { aiRouter } from './ai/index.js';
+import type { AIResponse, PipelineStage } from './ai/index.js';
+import { callModelWithRetry } from './openRouter.js';   // Kept for USE_AI_ROUTER=false rollback
 import { MODELS } from '../config/models.js';
+import { env } from '../config/env.js';
+
+// ── AI Router Toggle ─────────────────────────────────────────────────
+const USE_AI_ROUTER = env.USE_AI_ROUTER !== 'false';
+
+async function callAI(
+  stage: PipelineStage,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  logger: any,
+): Promise<AIResponse> {
+  if (USE_AI_ROUTER) {
+    return aiRouter.generate({ stage, systemPrompt, userPrompt }, logger);
+  }
+  const res = await callModelWithRetry(model, systemPrompt, userPrompt, logger);
+  return {
+    content: res.content,
+    provider: 'openrouter',
+    model,
+    durationMs: res.durationMs,
+    promptTokens: 0,
+    outputTokens: 0,
+    totalTokens: res.totalTokens,
+    estimatedCostUsd: res.estimatedCostUsd,
+  };
+}
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -117,7 +146,8 @@ export async function runThesisAudit(
 
   logger.info(`🔍 Auditing thesis "${thesis.title}" — ${writtenSections.length} sections, ~${totalWords} words`);
 
-  const auditRes = await callModelWithRetry(
+  const auditRes = await callAI(
+    'audit',
     MODELS.LARGE,
     `You are a senior academic thesis auditor reviewing a complete thesis manuscript.
 

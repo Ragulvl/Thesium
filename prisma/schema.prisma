@@ -86,15 +86,19 @@ model Section {
 }
 
 model Usage {
-  id        String   @id @default(uuid())
-  userId    String
-  thesisId  String?
-  sectionId String?
-  costUsd   Float
-  tokens    Int      @default(0)
-  model     String?  // which LLM model was used
-  stage     String?  // e.g. 'draft', 'review', 'polish', 'outline'
-  createdAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  userId       String
+  thesisId     String?
+  sectionId    String?
+  costUsd      Float
+  tokens       Int      @default(0)
+  model        String?  // which LLM model was used
+  stage        String?  // e.g. 'draft', 'review', 'polish', 'outline'
+  provider     String?  // 'gemini' | 'groq' | 'openrouter'
+  promptTokens Int?     // input tokens (provider-reported)
+  outputTokens Int?     // output tokens (provider-reported)
+  latencyMs    Int?     // response time in milliseconds
+  createdAt    DateTime @default(now())
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   thesis Thesis? @relation(fields: [thesisId], references: [id], onDelete: SetNull)

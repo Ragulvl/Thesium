@@ -13,11 +13,43 @@
 // Net cost increase: ~10-15% tokens. Quality improvement: ~30-50%.
 
 import { prisma } from '../config/prisma.js';
-import { callModelWithRetry } from './openRouter.js';
+import { aiRouter } from './ai/index.js';
+import type { AIResponse, PipelineStage } from './ai/index.js';
+import { callModelWithRetry } from './openRouter.js';   // Kept for USE_AI_ROUTER=false rollback
 import { fetchAcademicPapers } from './scholar.js';
 import { generateSubsectionImage } from './imageGenerator.js';
 import { DEFAULT_SECTIONS } from '../shared/constants.js';
 import { MODELS, MAX_JOB_COST_USD } from '../config/models.js';
+import { env } from '../config/env.js';
+
+// ── AI Router Toggle ─────────────────────────────────────────────────
+// Set USE_AI_ROUTER=false to instantly revert to legacy OpenRouter-only path.
+const USE_AI_ROUTER = env.USE_AI_ROUTER !== 'false';
+
+/** Unified AI call — routes through AIRouter or legacy OpenRouter based on toggle. */
+async function callAI(
+  stage: PipelineStage,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  logger: any,
+): Promise<AIResponse> {
+  if (USE_AI_ROUTER) {
+    return aiRouter.generate({ stage, systemPrompt, userPrompt }, logger);
+  }
+  // Legacy fallback — returns AIResponse-compatible shape
+  const res = await callModelWithRetry(model, systemPrompt, userPrompt, logger);
+  return {
+    content: res.content,
+    provider: 'openrouter',
+    model,
+    durationMs: res.durationMs,
+    promptTokens: 0,
+    outputTokens: 0,
+    totalTokens: res.totalTokens,
+    estimatedCostUsd: res.estimatedCostUsd,
+  };
+}
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -145,7 +177,8 @@ async function generateThesisBlueprint(
   costTracker: CostTracker
 ): Promise<ThesisBlueprint | null> {
   try {
-    const res = await callModelWithRetry(
+    const res = await callAI(
+      'blueprint',
       MODELS.FAST,
       `You are an academic thesis architect. Generate a structured research blueprint for the thesis described below.
 
@@ -190,7 +223,8 @@ async function validateCitations(
   costTracker: CostTracker
 ): Promise<string | null> {
   try {
-    const res = await callModelWithRetry(
+    const res = await callAI(
+      'citation-validation',
       MODELS.FAST,
       `You are a citation validator for academic writing. Your job is to check whether every in-text citation in the draft accurately refers to one of the provided source papers.
 
@@ -300,7 +334,8 @@ export async function runAIPipeline(thesisId: string, sectionId: string, job: an
   let meta: any = section.pipelineMetadata || {};
 
   if (!meta.subsections || meta.subsections.length === 0) {
-    const outlineRes = await callModelWithRetry(
+    const outlineRes = await callAI(
+      'outline',
       MODELS.DRAFTER,
       `You are an academic thesis structurer. For the section "${section!.label}" in a thesis titled "${thesis.title}" (field: ${thesis.field}), generate a structured outline.
 
@@ -406,7 +441,8 @@ PRECEDING TEXT:
     // ══════════════════════════════════════════════════════════════
     if (job) await job.updateProgress({ stage: 'Drafting', subsectionIndex: currentIndex, totalSubsections: subsections.length, percent: percent + 5 });
 
-    const draftRes = await callModelWithRetry(
+    const draftRes = await callAI(
+      'draft',
       MODELS.DRAFTER,
       `You are an expert academic writer. Write a complete, publication-ready subsection for an academic thesis.
 
@@ -449,7 +485,8 @@ REQUIREMENTS:
       ? `\n\nCITATION ISSUES TO FIX (identified by citation validator):\n${citationIssues}\n\nFor each ISSUE above: remove the fabricated citation OR replace it with a correctly used citation from the evidence list.`
       : '';
 
-    const reviewRes = await callModelWithRetry(
+    const reviewRes = await callAI(
+      'review',
       MODELS.LARGE,
       `You are a senior academic reviewer. Perform a comprehensive review pass on this thesis subsection.
 
@@ -474,7 +511,8 @@ RULES:
     // ══════════════════════════════════════════════════════════════
     if (job) await job.updateProgress({ stage: 'Polishing', subsectionIndex: currentIndex, totalSubsections: subsections.length, percent: percent + 15 });
 
-    const polishRes = await callModelWithRetry(
+    const polishRes = await callAI(
+      'polish',
       MODELS.MEDIUM,
       `You are a meticulous academic editor. Perform final polishing on this thesis subsection.
 
@@ -525,7 +563,8 @@ RULES:
       for (let retry = 1; retry <= 2; retry++) {
         await new Promise(r => setTimeout(r, 1000 * retry));
 
-        const retryRes = await callModelWithRetry(
+        const retryRes = await callAI(
+          'draft',
           MODELS.DRAFTER,
           `You are an expert academic writer. Your previous output was too short (${bestWordCount} words, need at least ${subsectionTargetWords}).
 
@@ -549,7 +588,8 @@ ${evidenceInstruction}
       }
 
       if (bestWordCount > wordCount) {
-        const rePolishRes = await callModelWithRetry(
+        const rePolishRes = await callAI(
+          'polish',
           MODELS.MEDIUM,
           `Polish this academic text. Fix grammar, spelling, and ensure academic tone.\n\nAfter the polished text, add "---MEMORY---" followed by JSON:\n{"summary":"...","keyFindings":[],"definitions":{},"importantClaims":[],"methodologyNotes":[]}\n\nDO NOT wrap in markdown code blocks.`,
           `Polish:\n\n${bestText}`,
@@ -615,7 +655,7 @@ ${evidenceInstruction}
       data: { content: currentContent.trim(), wordCount: finalWordCount, pipelineMetadata: meta as any },
     });
 
-    // Record usage
+    // Record usage — now includes provider-level metadata
     await prisma.usage.create({
       data: {
         userId: thesis.userId,
@@ -623,8 +663,12 @@ ${evidenceInstruction}
         sectionId,
         costUsd: draftRes.estimatedCostUsd + reviewRes.estimatedCostUsd + polishRes.estimatedCostUsd,
         tokens: draftRes.totalTokens + reviewRes.totalTokens + polishRes.totalTokens,
-        model: MODELS.DRAFTER,
+        model: draftRes.model,
         stage: `subsection:${subTitle}`,
+        provider: draftRes.provider,
+        promptTokens: draftRes.promptTokens + reviewRes.promptTokens + polishRes.promptTokens,
+        outputTokens: draftRes.outputTokens + reviewRes.outputTokens + polishRes.outputTokens,
+        latencyMs: draftRes.durationMs + reviewRes.durationMs + polishRes.durationMs,
       },
     }).catch((err: unknown) => logger.warn({ err }, 'Failed to record usage — non-fatal'));
 
