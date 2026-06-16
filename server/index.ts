@@ -1,278 +1,153 @@
+// Why: Added Helmet, restricted CORS, body size limit, auth on jobs endpoint, global error handler, unified imports.
 import express from 'express';
 import cors from 'cors';
-import { PrismaClient } from '@prisma/client';
-import pino from 'pino';
-import pinoHttp from 'pino-http';
-import OpenAI from 'openai';
-import "dotenv/config";
+import helmet from 'helmet';
+import { env } from './config/env.js';
+import { prisma } from './config/prisma.js';
+import { logger as baseLogger } from './config/logger.js';
+import { validateEnv } from './config/validateEnv.js';
+import { metricsMiddleware } from './middleware/metrics.js';
+import { requireAuth, AuthenticatedRequest } from './middleware/auth.js';
+import { generationQueue } from './services/queue.js';
+import { serverAdapter as bullBoardAdapter } from './config/bullboard.js';
+
+// Import Routes
+import thesesRoutes from './routes/theses.routes.js';
+import sectionsRoutes from './routes/sections.routes.js';
+import usersRoutes from './routes/users.routes.js';
+import adminRoutes from './routes/admin.routes.js';
+
+import paymentRoutes from './routes/payment.routes.js';
+import couponRoutes from './routes/coupon.routes.js';
+
+// Import Worker (only when running as combined API+worker, not in Docker worker mode)
+if (process.env.THESIUM_ROLE !== 'worker') {
+  import('./workers/generation.worker.js');
+}
+
+// Validate environment before anything else
+validateEnv();
 
 const app = express();
-const prisma = new PrismaClient();
-const PORT = process.env.PORT || 3001;
 
-// Initialize OpenAI client for OpenRouter
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY || "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",
-  defaultHeaders: {
-    "HTTP-Referer": "http://localhost:10000", // Optional, for including your app on openrouter.ai rankings.
-    "X-Title": "Thesium", // Optional. Shows in rankings on openrouter.ai.
-  }
-});
+// ── Security Middleware ──────────────────────────────────────────────
+const FRONTEND_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:10000').split(',');
 
-// Setup Production Grade Logger
-const baseLogger = pino({
-  transport: process.env.NODE_ENV !== 'production' ? {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: "UTC:yyyy-mm-dd'T'HH:MM:ss'Z'",
-      ignore: 'pid,hostname'
-    }
-  } : undefined,
-});
+app.use(helmet({
+  crossOriginOpenerPolicy: false,   // Required: Google Sign-In uses popup/iframe postMessage
+  crossOriginEmbedderPolicy: false, // Required: allows Google scripts to load
+}));
+app.use(cors({ origin: FRONTEND_ORIGINS, credentials: true }));
+app.use(express.json({ limit: process.env.BODY_LIMIT || '1mb' }));
 
-const logger = pinoHttp({ logger: baseLogger });
+// ── Request Logging ──────────────────────────────────────────────────
+// Only log mutations (POST/PUT/DELETE) and errors — hides polling GETs
+app.use((req, res, next) => {
+  const url = req.url || '';
+  if (url === '/api/health' || url.includes('favicon')) return next();
 
-app.use(logger);
-app.use(cors());
-app.use(express.json());
+  const start = Date.now();
+  const originalEnd = res.end;
 
-// Health check
-app.get('/api/health', (req, res) => {
-  req.log.info('Health check pinged');
-  res.json({ status: 'ok', database: 'connected' });
-});
+  res.end = function (...args: any[]) {
+    const ms = Date.now() - start;
+    const code = res.statusCode;
+    const method = req.method;
 
-// Sync User endpoint (called on Google Login)
-app.post('/api/users/sync', async (req, res) => {
-  try {
-    const { id, email, name, picture } = req.body;
-    
-    if (!id || !email) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const user = await prisma.user.upsert({
-      where: { id },
-      update: { name, picture }, // Update profile details if they changed
-      create: { id, email, name, picture }
-    });
-
-    req.log.info({ userId: user.id }, 'User synced to database');
-    res.status(200).json(user);
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to sync user');
-    res.status(500).json({ error: 'Failed to sync user to database' });
-  }
-});
-
-// Example Thesis endpoints
-app.get('/api/theses/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const theses = await prisma.thesis.findMany({
-      where: { userId },
-      orderBy: { updatedAt: 'desc' }
-    });
-    req.log.info({ userId, count: theses.length }, 'Fetched theses for user');
-    res.json(theses);
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to fetch theses');
-    res.status(500).json({ error: 'Failed to fetch theses' });
-  }
-});
-
-// Create Thesis endpoint
-app.post('/api/theses', async (req, res) => {
-  try {
-    const { userId, title, field, targetPages, researchQuestion, status, progress } = req.body;
-    
-    // Basic validation
-    if (!userId || !title || !field) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const newThesis = await prisma.thesis.create({
-      data: {
-        userId,
-        title,
-        field,
-        targetPages: targetPages || 60,
-        researchQuestion,
-        status: status || 'draft',
-        progress: progress || 0,
-      }
-    });
-
-    req.log.info({ thesisId: newThesis.id, userId }, 'Created new thesis');
-    res.status(201).json(newThesis);
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to create thesis');
-    res.status(500).json({ error: 'Failed to create thesis' });
-  }
-});
-
-// --- SECTION & AI GENERATION ENDPOINTS ---
-
-const DEFAULT_SECTIONS = [
-  { id: 'title',         label: 'Title Page' },
-  { id: 'abstract',      label: 'Abstract' },
-  { id: 'toc',           label: 'Table of Contents' },
-  { id: 'introduction',  label: 'Introduction' },
-  { id: 'literature',    label: 'Literature Review' },
-  { id: 'methodology',   label: 'Methodology' },
-  { id: 'results',       label: 'Results' },
-  { id: 'discussion',    label: 'Discussion' },
-  { id: 'conclusion',    label: 'Conclusion' },
-  { id: 'references',    label: 'References' },
-];
-
-app.get('/api/theses/:thesisId/sections', async (req, res) => {
-  try {
-    const { thesisId } = req.params;
-    
-    // Check if sections already exist
-    let sections = await prisma.section.findMany({
-      where: { thesisId },
-      orderBy: { order: 'asc' }
-    });
-
-    // If no sections exist (first time opening workspace), seed them
-    if (sections.length === 0) {
-      req.log.info({ thesisId }, 'Seeding default sections for thesis');
-      await prisma.$transaction(
-        DEFAULT_SECTIONS.map((sec, idx) => 
-          prisma.section.create({
-            data: {
-              thesisId,
-              id: sec.id,
-              label: sec.label,
-              order: idx,
-              content: '',
-              wordCount: 0
-            }
-          })
-        )
+    // Only log: non-GET requests, or errors (4xx/5xx)
+    if (method !== 'GET' || code >= 400) {
+      const color = code >= 500 ? '\x1b[31m' : code >= 400 ? '\x1b[33m' : '\x1b[32m';
+      console.log(
+        `\x1b[90m${new Date().toLocaleTimeString()}\x1b[0m` +
+        ` ${color}${method.padEnd(6)}\x1b[0m ${url} → ${color}${code}\x1b[0m \x1b[90m(${ms}ms)\x1b[0m`
       );
-      sections = await prisma.section.findMany({
-        where: { thesisId },
-        orderBy: { order: 'asc' }
-      });
     }
+    return originalEnd.apply(res, args as any);
+  } as any;
 
-    res.json(sections);
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to fetch/seed sections');
-    res.status(500).json({ error: 'Failed to load sections' });
-  }
+  next();
+});
+app.use(metricsMiddleware);
+
+// ── Health Check ─────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', database: 'connected', backgroundWorkers: 'active' });
 });
 
-// Auto-save endpoint for typing in the Workspace
-app.patch('/api/theses/:thesisId/sections/:sectionId', async (req, res) => {
+// ── API Routes ───────────────────────────────────────────────────────
+app.use('/api/users', usersRoutes);
+app.use('/api/theses', thesesRoutes);
+app.use('/api/theses', sectionsRoutes);
+app.use('/api/admin', adminRoutes);
+
+app.use('/api/payments', paymentRoutes);
+app.use('/api/coupons', couponRoutes);
+
+// ── Bull Board Dashboard (Super Admin only) ──────────────────────────
+app.use('/admin/queues', requireAuth, (req: AuthenticatedRequest, res, next) => {
+  if (req.user?.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: 'Forbidden: Requires Super Admin' });
+  }
+  next();
+}, bullBoardAdapter.getRouter());
+
+// ── Job Status Endpoint (protected) ─────────────────────────────────
+app.get('/api/jobs/:jobId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const jobId = req.params.jobId as string;
+  const job = await generationQueue.getJob(jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  // Ownership check: job data must contain the requesting user's thesis
+  if (job.data?.userId && job.data.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const state = await job.getState();
+  return res.json({ id: job.id, state, returnvalue: job.returnvalue, failedReason: job.failedReason });
+});
+
+// ── Global Error Handler ─────────────────────────────────────────────
+app.use((err: any, req: any, res: any, _next: any) => {
+  // Zod validation errors
+  if (err.name === 'ZodError') {
+    return res.status(400).json({
+      error: 'Validation failed',
+      details: err.issues?.map((i: any) => ({ path: i.path.join('.'), message: i.message })),
+    });
+  }
+
+  const statusCode = err.status || err.statusCode || 500;
+  baseLogger.error({ err, path: req.path, method: req.method }, 'Unhandled error');
+  return res.status(statusCode).json({
+    error: statusCode === 500 ? 'Internal server error' : (err.message || 'Error'),
+  });
+});
+
+// ── Bootstrap ────────────────────────────────────────────────────────
+async function bootstrap() {
   try {
-    const { thesisId, sectionId } = req.params;
-    const { content, wordCount } = req.body;
+    await prisma.$connect();
+    baseLogger.info('Prisma connected to database');
 
-    const updated = await prisma.section.update({
-      where: { thesisId_id: { thesisId, id: sectionId } },
-      data: { content, wordCount }
+    app.listen(env.PORT, () => {
+      baseLogger.info(`Server running on http://localhost:${env.PORT}`);
     });
-
-    res.json(updated);
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to auto-save section');
-    res.status(500).json({ error: 'Failed to save section' });
+  } catch (err) {
+    baseLogger.error({ err }, 'Failed to connect to database or start server');
+    process.exit(1);
   }
-});
+}
 
-// AI Generation Endpoint using OpenRouter
-app.post('/api/theses/:thesisId/sections/:sectionId/generate', async (req, res) => {
-  try {
-    const { thesisId, sectionId } = req.params;
+bootstrap();
 
-    // Fetch the thesis config to feed the AI
-    const thesis = await prisma.thesis.findUnique({
-      where: { id: thesisId }
-    });
+// ── Graceful Shutdown ────────────────────────────────────────────────
+const shutdown = async (signal: string) => {
+  baseLogger.info(`${signal} received: shutting down gracefully`);
+  await prisma.$disconnect();
+  process.exit(0);
+};
 
-    if (!thesis) return res.status(404).json({ error: 'Thesis not found' });
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-    // Fetch the specific section label
-    const section = await prisma.section.findUnique({
-      where: { thesisId_id: { thesisId, id: sectionId } }
-    });
-
-    if (!section) return res.status(404).json({ error: 'Section not found' });
-
-    const systemPrompt = `You are an academic thesis generation engine working inside a platform called **Thesium**. Your task is to generate professional, well-structured academic thesis content based on a user-provided topic and required number of pages.
-
-GENERAL REQUIREMENTS
-• Write in formal academic English.
-• Maintain logical flow between chapters.
-• Avoid repetition and filler text.
-• Ensure each chapter contributes to answering the research question.
-• Expand content naturally so that the final document realistically fills the requested number of pages.
-• Use clear headings and subheadings.
-
-PAGE DISTRIBUTION RULE
-The approximate distribution should follow this pattern:
-Front Matter (Title, Abstract, TOC) → 5%
-Introduction → 12%
-Literature Review → 30%
-Methodology → 20%
-Results → 18%
-Discussion → 10%
-Conclusion → 4%
-References → 1%
-
-FORMATTING RULES
-• Use hierarchical headings (H1, H2, H3) using Markdown.
-• Maintain academic paragraph structure.
-• Avoid bullet-heavy writing inside main chapters.
-• Ensure consistent terminology throughout the thesis.
-• DO NOT wrap your entire response in a markdown code block. Return raw markdown text directly.`;
-
-    const instructions = `Generate ONLY the content for the section titled: "${section.label}".
-Research Topic: ${thesis.title}
-Academic Field: ${thesis.field}
-Research Question: ${thesis.researchQuestion || 'Not specified'}
-Target Total Thesis Pages: ${thesis.targetPages}
-
-Scale your writing specifically for this section based on the total target pages (${thesis.targetPages}) and the Page Distribution Rule.
-Do not include content meant for other sections. Write it in Markdown.`;
-
-    req.log.info({ thesisId, sectionId, model: 'gpt-4o' }, 'Requesting generation from OpenRouter');
-
-    const completion = await openai.chat.completions.create({
-      model: "openai/gpt-4o-2024-11-20", // Use standard flagship model via OpenRouter
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: instructions }
-      ]
-    });
-
-    const generatedContent = completion.choices[0]?.message?.content || "";
-    const generatedWordCount = generatedContent.split(/\s+/).filter(Boolean).length;
-
-    // Persist to database immediately
-    const updatedSection = await prisma.section.update({
-      where: { thesisId_id: { thesisId, id: sectionId } },
-      data: {
-        content: generatedContent,
-        wordCount: generatedWordCount
-      }
-    });
-
-    req.log.info({ thesisId, sectionId, words: generatedWordCount }, 'Generated and saved content successfully');
-    res.json(updatedSection);
-
-  } catch (error) {
-    req.log.error({ err: error }, 'Failed to dynamically generate section');
-    res.status(500).json({ error: 'AI Error: Failed to generate section content' });
-  }
-});
-
-app.listen(PORT, () => {
-  baseLogger.info(`🚀 [Backend API] Server successfully started and running on http://localhost:${PORT}`);
-});
+export { app };

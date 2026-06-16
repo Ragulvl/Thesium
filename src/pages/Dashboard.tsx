@@ -22,7 +22,7 @@ export interface ThesisItem {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { success, info } = useToast();
-  const { user } = useGoogleAuth();
+  const { user, getToken } = useGoogleAuth();
   const [exportOpen, setExportOpen] = useState(false);
   const [exportTitle, setExportTitle] = useState('');
   const [loading, setLoading] = useState(true);
@@ -32,17 +32,29 @@ export default function Dashboard() {
   useEffect(() => {
     if (!user?.sub) return;
 
-    fetch(`/api/theses/${user.sub}`)
-      .then((res) => res.json())
-      .then((data) => {
-        setTheses(data);
-        setLoading(false);
-      })
-      .catch((err) => {
+    const loadTheses = async () => {
+      try {
+        const token = getToken();
+        const res = await fetch(`/api/theses/`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) {
+          logger.warn({ status: res.status }, 'Theses API returned non-OK');
+          setTheses([]);
+          setLoading(false);
+          return;
+        }
+        const data = await res.json();
+        setTheses(Array.isArray(data) ? data : []);
+      } catch (err) {
         logger.error({ err }, 'Failed to fetch theses');
+        setTheses([]);
+      } finally {
         setLoading(false);
-      });
-  }, [user?.sub]);
+      }
+    };
+    loadTheses();
+  }, [user?.sub, getToken]);
 
   const stats = [
     { label: 'Active Projects', value: theses.length.toString(), icon: FileText, color: 'text-primary', bg: 'bg-primary/10' },
@@ -57,9 +69,30 @@ export default function Dashboard() {
     info('Preparing export options…', 'Download');
   };
 
-  const handleOpen = (title: string) => {
+  const handleDelete = async (id: number | string, title: string) => {
+    if (!window.confirm(`Are you sure you want to delete "${title}"? This cannot be undone.`)) return;
+    try {
+      setTheses(prev => prev.filter(t => t.id !== id));
+      const res = await fetch(`/api/theses/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${getToken()}` }
+      });
+      if (!res.ok) throw new Error('Failed to delete thesis');
+      success(`Deleted "${title.slice(0, 40)}…"`, 'Thesis Deleted');
+    } catch (err) {
+      logger.error({ err }, 'Failed to delete thesis');
+      // Re-fetch on error to restore UI
+      const token = getToken();
+      if (token) {
+        fetch('/api/theses/', { headers: { 'Authorization': `Bearer ${token}` } })
+          .then(res => res.json()).then(setTheses);
+      }
+    }
+  };
+
+  const handleOpen = (title: string, thesisConfig: any) => {
     success(`Opened "${title.slice(0, 40)}…"`, 'Thesis Opened');
-    navigate('/workspace');
+    navigate(`/workspace/${thesisConfig.id}`);
   };
 
   return (
@@ -130,8 +163,9 @@ export default function Dashboard() {
                   <ThesisCard
                     key={thesis.id}
                     {...thesis}
-                    onOpen={() => handleOpen(thesis.title)}
+                    onOpen={() => handleOpen(thesis.title, { id: thesis.id, topic: thesis.title, field: thesis.field, pages: thesis.targetPages, progress: thesis.progress })}
                     onDownload={() => handleDownload(thesis.title)}
+                    onDelete={() => handleDelete(thesis.id, thesis.title)}
                   />
                 ))}
                 {/* Add new card */}

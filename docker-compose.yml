@@ -1,0 +1,119 @@
+# ═══════════════════════════════════════════════════════════════════
+# Thesium — Docker Compose
+# Usage:
+#   Development: docker compose up
+#   Production:  docker compose --env-file .env.production up -d
+#   Scale workers: docker compose up -d --scale worker=3
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-thesium}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-thesium_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-thesium}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-thesium}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  # ── Redis ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  # ── Thesium API Server ─────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3001}:3001"
+    environment: &app-env
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3001
+      THESIUM_ROLE: api
+      DATABASE_URL: postgresql://${POSTGRES_USER:-thesium}:${POSTGRES_PASSWORD:-thesium_dev_password}@postgres:5432/${POSTGRES_DB:-thesium}
+      REDIS_URL: redis://redis:6379
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:10000}
+      BODY_LIMIT: ${BODY_LIMIT:-1mb}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LLM_CALL_TIMEOUT_MS: ${LLM_CALL_TIMEOUT_MS:-30000}
+      MAX_JOB_COST_USD: ${MAX_JOB_COST_USD:-0.50}
+      FREE_THESIS_LIMIT: ${FREE_THESIS_LIMIT:-2}
+      MODEL_FAST: ${MODEL_FAST:-}
+      MODEL_MEDIUM: ${MODEL_MEDIUM:-}
+      MODEL_LARGE: ${MODEL_LARGE:-}
+      MODEL_DRAFTER: ${MODEL_DRAFTER:-}
+      SEED_SUPER_ADMIN_GOOGLE_SUB: ${SEED_SUPER_ADMIN_GOOGLE_SUB:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - app_logs:/app/server/logs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  # ── Thesium Background Worker ──────────────────────
+  # Separate from API so queue jobs can't block HTTP requests.
+  # Scale independently: docker compose up -d --scale worker=3
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      THESIUM_ROLE: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - app_logs:/app/server/logs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1024M
+
+volumes:
+  postgres_data:
+  redis_data:
+  app_logs:

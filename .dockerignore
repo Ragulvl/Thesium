@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+.env*
+server/logs
+.vscode
+.gemini
+typecheck_errors*.txt

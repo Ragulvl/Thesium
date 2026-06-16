@@ -1,28 +1,80 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { BookOpen, Mail, ArrowRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import Button from '../components/ui/Button';
-import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { useGoogleAuth } from '../contexts/GoogleAuthContext';
 import { useToast } from '../contexts/ToastContext';
+
+const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
   const navigate = useNavigate();
-  const { login } = useGoogleAuth();
+  const { login, user } = useGoogleAuth();
   const { error, success } = useToast();
+  const googleBtnRef = useRef<HTMLDivElement>(null);
+  const scriptLoaded = useRef(false);
 
-  const handleGoogleSuccess = async (credentialResponse: CredentialResponse) => {
-    if (credentialResponse.credential) {
-      await login(credentialResponse.credential);
-      success("Successfully signed in with Google!", "Authentication");
-      navigate('/dashboard');
+  // Redirect if already logged in
+  useEffect(() => {
+    if (user) navigate('/dashboard', { replace: true });
+  }, [user, navigate]);
+
+  // Load Google Identity Services script and render button
+  useEffect(() => {
+    if (scriptLoaded.current) return;
+
+    const handleCredentialResponse = async (response: { credential: string }) => {
+      try {
+        await login(response.credential);
+        success("Successfully signed in with Google!", "Authentication");
+        navigate('/dashboard');
+      } catch {
+        error("Google Sign-In failed.", "Authentication Error");
+      }
+    };
+
+    const initializeGsi = () => {
+      if (!(window as any).google?.accounts?.id) return;
+      
+      (window as any).google.accounts.id.initialize({
+        client_id: CLIENT_ID,
+        callback: handleCredentialResponse,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+
+      if (googleBtnRef.current) {
+        (window as any).google.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'filled_blue',
+          size: 'large',
+          shape: 'rectangular',
+          text: isLogin ? 'signin_with' : 'signup_with',
+          width: 350,
+        });
+      }
+
+      scriptLoaded.current = true;
+    };
+
+    // Check if script already loaded
+    if ((window as any).google?.accounts?.id) {
+      initializeGsi();
+      return;
     }
-  };
 
-  const handleGoogleError = () => {
-    error("Google Sign-In failed or was cancelled.", "Authentication Error");
-  };
+    // Load the GSI script
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = initializeGsi;
+    document.head.appendChild(script);
+
+    return () => {
+      // Don't remove the script — it's cached globally
+    };
+  }, [isLogin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,15 +133,8 @@ export default function Auth() {
 
           <div className="space-y-4">
             <div className="flex justify-center w-full">
-              <GoogleLogin
-                onSuccess={handleGoogleSuccess}
-                onError={handleGoogleError}
-                useOneTap
-                theme="filled_blue"
-                shape="rectangular"
-                text={isLogin ? "signin_with" : "signup_with"}
-                width="100%"
-              />
+              {/* Native Google Sign-In button — rendered by GSI library */}
+              <div ref={googleBtnRef} id="google-signin-btn" />
             </div>
           </div>
 

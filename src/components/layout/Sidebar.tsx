@@ -1,6 +1,8 @@
-import { BookOpen, Home, FileText, PlusCircle, LayoutTemplate, Settings, LogOut, User } from 'lucide-react';
+import { useState } from 'react';
+import { BookOpen, Home, FileText, PlusCircle, LayoutTemplate, Settings, LogOut, User, Activity, BarChart3 } from 'lucide-react';
 
 import { useNavigate } from 'react-router-dom';
+import { useGoogleAuth } from '../../contexts/GoogleAuthContext';
 
 interface SidebarProps {
   activeItem?: string;
@@ -8,7 +10,9 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ activeItem = 'dashboard', onMobileClose }: SidebarProps) {
+  const [imgError, setImgError] = useState(false);
   const navigate = useNavigate();
+  const { user, logout } = useGoogleAuth();
 
   const handleNav = (path: string) => {
     navigate(path);
@@ -19,8 +23,15 @@ export default function Sidebar({ activeItem = 'dashboard', onMobileClose }: Sid
     { id: 'my-theses',  label: 'My Theses',  icon: FileText },
     { id: 'new-thesis', label: 'New Thesis',  icon: PlusCircle },
     { id: 'templates',  label: 'Templates',   icon: LayoutTemplate },
+    { id: 'usage',      label: 'Usage',       icon: BarChart3 },
+    { id: 'admin/metrics', label: 'Metrics',  icon: Activity },
     { id: 'settings',   label: 'Settings',    icon: Settings },
   ];
+
+  const handleLogout = () => {
+    logout();
+    navigate('/');
+  };
 
   return (
     <div className="w-64 h-screen bg-card text-card-foreground border-r border-border flex flex-col flex-shrink-0">
@@ -67,14 +78,26 @@ export default function Sidebar({ activeItem = 'dashboard', onMobileClose }: Sid
       {/* User */}
       <div className="p-3 border-t border-border mt-auto">
         <div className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent/50 cursor-pointer transition-colors group">
-          <div className="w-8 h-8 rounded bg-secondary flex items-center justify-center flex-shrink-0">
-            <User size={14} className="text-secondary-foreground" />
+          <div className="w-8 h-8 rounded bg-secondary flex items-center justify-center flex-shrink-0 overflow-hidden">
+            {user?.picture && !imgError ? (
+              <img 
+                src={user.picture} 
+                alt="Profile" 
+                className="w-full h-full object-cover bg-white" 
+                referrerPolicy="no-referrer"
+                onError={() => setImgError(true)}
+              />
+            ) : (
+              <User size={14} className="text-secondary-foreground" />
+            )}
           </div>
           <div className="flex-1 min-w-0 text-left">
-            <p className="text-sm font-medium text-foreground truncate leading-tight">User</p>
-            <p className="text-[11px] text-muted-foreground truncate leading-tight">user@example.com</p>
+            <p className="text-sm font-medium text-foreground truncate leading-tight">{user?.name || 'User'}</p>
+            <p className="text-[11px] text-muted-foreground truncate leading-tight">{user?.email || 'user@example.com'}</p>
           </div>
-          <LogOut size={14} className="text-muted-foreground group-hover:text-foreground transition-colors flex-shrink-0" />
+          <button onClick={handleLogout} className="p-1 hover:bg-accent rounded-md group-hover:text-foreground transition-colors" title="Logout">
+            <LogOut size={14} className="text-muted-foreground group-hover:text-destructive flex-shrink-0" />
+          </button>
         </div>
       </div>
     </div>

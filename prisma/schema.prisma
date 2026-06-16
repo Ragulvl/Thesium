@@ -1,3 +1,4 @@
+// Why: Added Role enum, googleSub field, made email optional — fixes broken admin auth.
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,14 +8,27 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  name      String
-  picture   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  theses    Thesis[]
+  id          String   @id @default(uuid())
+  googleSub   String?  @unique
+  email       String?  @unique
+  name        String?
+  picture     String?
+  role        Role     @default(USER)
+  tier        String   @default("free")  // "free", "starter", "pro"
+  thesisQuota Int      @default(2)       // total theses allowed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  theses      Thesis[]
+  usage       Usage[]
+  payments    Payment[]
+  couponRedemptions CouponRedemption[]
 }
 
 model Thesis {
@@ -27,11 +41,15 @@ model Thesis {
   progress         Int      @default(0)
   status           String   @default("draft") // "draft", "review", etc
   wordCount        Int      @default(0)
+  outline          String?
   userId           String
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   sections         Section[]
+  usage            Usage[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model Section {
@@ -40,6 +58,7 @@ model Section {
   label       String   // e.g. 'Abstract', 'Introduction'
   content     String   @default("")
   wordCount   Int      @default(0)
+  pipelineMetadata Json?
   order       Int      // used for sorting
   thesisId    String
   thesis      Thesis   @relation(fields: [thesisId], references: [id], onDelete: Cascade)
@@ -47,4 +66,81 @@ model Section {
   updatedAt   DateTime @updatedAt
 
   @@unique([thesisId, id])
+  @@index([thesisId])
 }
+
+model Usage {
+  id        String   @id @default(uuid())
+  userId    String
+  thesisId  String?
+  sectionId String?
+  costUsd   Float
+  tokens    Int      @default(0)
+  model     String?  // which LLM model was used
+  stage     String?  // e.g. 'draft', 'review', 'polish', 'outline'
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thesis Thesis? @relation(fields: [thesisId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([thesisId])
+  @@index([createdAt])
+}
+
+model Payment {
+  id                 String    @id @default(uuid())
+  userId             String
+  razorpayOrderId    String    @unique
+  razorpayPaymentId  String?
+  razorpaySignature  String?
+  planId             String    // "starter", "pro", "unlimited"
+  amount             Int       // final amount in paise (after discount)
+  originalAmount     Int?      // original amount before coupon discount
+  couponCode         String?   // coupon applied, if any
+  currency           String    @default("INR")
+  status             String    @default("created") // "created", "paid", "failed"
+  paidAt             DateTime?
+  createdAt          DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Coupon {
+  id             String    @id @default(uuid())
+  code           String    @unique   // e.g. "LAUNCH50", "FRIEND20"
+  description    String?             // admin-visible note
+  discountType   String              // "percent" or "flat"
+  discountValue  Float               // 50 (= 50%) or 2000 (= ₹20 flat in paise)
+  minAmount      Int       @default(0)   // min order amount (paise) to use the coupon
+  maxDiscount    Int?                // cap in paise for percent coupons (e.g. ₹30 max = 3000)
+  applicablePlans String[] @default([])  // empty = all plans, or ["starter","pro"]
+  maxUses        Int?                // null = unlimited global uses
+  maxUsesPerUser Int       @default(1)   // how many times a single user can use it
+  currentUses    Int       @default(0)   // global redemption counter
+  active         Boolean   @default(true)
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  redemptions CouponRedemption[]
+
+  @@index([code])
+}
+
+model CouponRedemption {
+  id        String   @id @default(uuid())
+  userId    String
+  couponId  String
+  paymentId String?
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([couponId])
+}
+

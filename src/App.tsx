@@ -6,23 +6,20 @@ import Dashboard from './pages/Dashboard';
 import MyTheses from './pages/MyTheses';
 import Settings from './pages/Settings';
 import NewThesis from './pages/NewThesis';
-import GeneratingThesis from './pages/GeneratingThesis';
+
 import ThesisWorkspace from './pages/ThesisWorkspace';
+import MetricsDashboard from './pages/admin/MetricsDashboard';
+import UsageDashboard from './pages/UsageDashboard';
+import Pricing from './pages/Pricing';
 import Sidebar from './components/layout/Sidebar';
 import { ToastProvider } from './contexts/ToastContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { AuthProvider } from './contexts/GoogleAuthContext';
 import ToastContainer from './components/ui/Toast';
 import ProtectedRoute from './components/layout/ProtectedRoute';
-import { GoogleOAuthProvider } from '@react-oauth/google';
 
-const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
-export interface ThesisConfig {
-  topic: string;
-  field: string;
-  pages: number;
-}
+
 
 // Global state emulation wrapper (in a real app this would move to Context or Redux)
 function AppRoutes() {
@@ -61,8 +58,6 @@ function AppRoutes() {
       {/* Full screen routes */}
       <Route path="/" element={<LandingPage />} />
       <Route path="/auth" element={<Auth />} />
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/auth" element={<Auth />} />
 
       {/* Protected Routes */}
       <Route element={<ProtectedRoute />}>
@@ -71,12 +66,14 @@ function AppRoutes() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/my-theses" element={<MyTheses />} />
           <Route path="/templates" element={<MyTheses />} />
+          <Route path="/admin/metrics" element={<MetricsDashboard />} />
+          <Route path="/usage" element={<UsageDashboard />} />
+          <Route path="/pricing" element={<Pricing />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/new-thesis" element={<NewThesis />} />
         </Route>
 
-        <Route path="/new-thesis" element={<NewThesis />} />
-        <Route path="/generating" element={<GeneratingThesis />} />
-        <Route path="/workspace" element={<ThesisWorkspace />} />
+        <Route path="/workspace/:id" element={<ThesisWorkspace />} />
       </Route>
 
       {/* Catch all */}
@@ -89,14 +86,12 @@ function App() {
   return (
     <ThemeProvider>
       <ToastProvider>
-        <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
-          <AuthProvider>
-            <BrowserRouter>
-              <AppRoutes />
-              <ToastContainer />
-            </BrowserRouter>
-          </AuthProvider>
-        </GoogleOAuthProvider>
+        <AuthProvider>
+          <BrowserRouter>
+            <AppRoutes />
+            <ToastContainer />
+          </BrowserRouter>
+        </AuthProvider>
       </ToastProvider>
     </ThemeProvider>
   );

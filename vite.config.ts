@@ -10,6 +10,10 @@ export default defineConfig({
   server: {
     port: 10000,
     strictPort: true,
+    headers: {
+      // Required for Google Sign-In: allow Google's iframe/popup to postMessage
+      'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:3001',

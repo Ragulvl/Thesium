@@ -1,4 +1,4 @@
-import { FileText, Clock, MoreHorizontal, ExternalLink, Download, Sparkles } from 'lucide-react';
+import { FileText, Clock, Trash2, ExternalLink, Download, Sparkles } from 'lucide-react';
 import Button from './Button';
 
 interface ThesisCardProps {
@@ -10,6 +10,7 @@ interface ThesisCardProps {
   targetPages?: number;
   onOpen?: () => void;
   onDownload?: () => void;
+  onDelete?: () => void;
 }
 
 const FIELD_COLORS: Record<string, string> = {
@@ -21,7 +22,7 @@ const FIELD_COLORS: Record<string, string> = {
   'Engineering':           'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
 };
 
-export default function ThesisCard({ title, field, lastEdited, progress, targetPages, onOpen, onDownload }: ThesisCardProps) {
+export default function ThesisCard({ title, field, lastEdited, progress, targetPages, onOpen, onDownload, onDelete }: ThesisCardProps) {
   const fieldColor = FIELD_COLORS[field] || 'bg-secondary text-secondary-foreground border-border';
 
   return (
@@ -31,8 +32,12 @@ export default function ThesisCard({ title, field, lastEdited, progress, targetP
         <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
           <FileText size={18} className="text-primary" />
         </div>
-        <button className="p-1.5 rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors opacity-0 group-hover:opacity-100">
-          <MoreHorizontal size={16} />
+        <button 
+          onClick={onDelete}
+          className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
+          title="Delete Thesis"
+        >
+          <Trash2 size={16} />
         </button>
       </div>
 

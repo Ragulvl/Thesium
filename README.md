@@ -1,111 +1,136 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/graduation-cap.svg" alt="Thesium Logo" width="80" height="80">
-  
-  # Thesium
+# Thesium
 
-  **An Intelligent, Full-Stack Thesis Generation & Workspacing Platform**
+AI-powered academic thesis generation platform built with React, Express, Prisma, BullMQ, and OpenRouter.
 
-  [![React](https://img.shields.io/badge/React-18.x-blue?style=flat-square&logo=react)](https://reactjs.org/)
-  [![Vite](https://img.shields.io/badge/Vite-5.x-purple?style=flat-square&logo=vite)](https://vitejs.dev/)
-  [![Express.js](https://img.shields.io/badge/Express-5.x-lightgrey?style=flat-square&logo=express)](https://expressjs.com/)
-  [![Prisma](https://img.shields.io/badge/Prisma-6.x-1B222D?style=flat-square&logo=prisma)](https://www.prisma.io/)
-  [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-336791?style=flat-square&logo=postgresql)](https://neon.tech/)
-  [![OpenRouter API](https://img.shields.io/badge/AI-gpt--4o-00A67E?style=flat-square&logo=openai)](https://openrouter.ai/)
-</div>
+## Quick Start
 
----
-
-## 📖 Overview
-
-**Thesium** is an intelligent, full-stack unified platform engineered to help students, researchers, and academics streamline the complex process of conceptualizing, structuring, and writing their thesis papers. 
-
-Powered by OpenAI's flagship `gpt-4o` model via OpenRouter, Thesium offers dynamic AI content scaling, rich text work-spacing, instantaneous cloud persistence, and a highly polished modern user interface.
-
-## ✨ Core Features
-
-- **🔐 Google OAuth Authentication:** Secure, robust login integrated directly with Google accounts, orchestrating seamless user profile synchronization.
-- **📊 Interactive Dashboard:** A comprehensive command center to manage ongoing projects, toggle elegant Dark/Light modes, and visualize academic progress metrics against target page counts.
-- **🤖 Intelligent Thesis Engine:** Users declare an Academic Field, Research Topic, and Target Length. Thesium's custom system framing auto-generates deep contextual structures to drive the AI.
-- **✍️ Distraction-Free Workspace:** A Notion-inspired rich-text editor painstakingly customized for long-form academic writing. Equipped with aggressive, debounced auto-saving architectures ensuring absolute data integrity.
-- **⚡ Dynamic AI Scaling:** By initiating a generation sequence, Thesium leverages `gpt-4o` combined with rigorous academic structuring constraints (Abstract, Introduction, Literature Review, Methodology, Results, Discussion, Conclusion). It precisely scales the output word count relative to the overarching target page goals.
-- **☁️ Serverless Data Persistence:** Every keystroke and piece of AI-generated prose is securely transacted to a fully-managed Neon Serverless PostgreSQL Database via the Prisma ORM.
-
-## 🏗️ Architecture
-
-The application implements a decoupled client-server architecture:
-
-```mermaid
-graph TD
-    Client[React/Vite Frontend] -->|REST API| Express[Node.js/Express Backend]
-    Express -->|Prisma ORM| Neon[(Neon PostgreSQL DB)]
-    Express -->|LLM Prompts| OpenRouter[OpenRouter AI / GPT-4o]
+```bash
+npm install
+npx prisma generate
+npx prisma migrate dev
+npm run dev
 ```
 
-### Relational Schema (Prisma)
-- **`User`**: Tracks Google Authentication identities and metadata.
-- **`Thesis`**: Defines the overarching project constraints (`targetPages`, `field`, `researchQuestion`).
-- **`Section`**: Granular, ordered child records tied to a specific `Thesis` containing dynamic `wordCount` tracking and raw Markdown `content`.
+## Environment Variables
 
-## 🚀 Getting Started
+Configure the following variables in your `.env` file:
 
-Follow these instructions to provision a local development environment.
+| Variable | Description | Required |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | Yes |
+| `OPENROUTER_API_KEY` | OpenRouter API key for AI generation | Yes |
+| `VITE_GOOGLE_CLIENT_ID` | Google OAuth Client ID | Yes |
+| `REDIS_URL` | Redis connection URL (default: `redis://localhost:6379`) | Yes |
+| `ALLOWED_ORIGINS` | Comma-separated frontend origins for CORS (default: `http://localhost:10000`) | No |
+| `BODY_LIMIT` | Max request body size (default: `1mb`) | No |
+| `LOG_LEVEL` | Pino log level (default: `info`) | No |
+| `SEED_SUPER_ADMIN_GOOGLE_SUB` | Google Subject ID of the Super Admin user | No |
+| `LLM_CALL_TIMEOUT_MS` | Per-LLM-call timeout in ms (default: `30000`) | No |
+| `MAX_JOB_COST_USD` | Max estimated cost per pipeline job (default: `0.50`) | No |
+| `MODEL_FAST` | Fast model for outlines/summaries (default: `google/gemma-3n-2b-it`) | No |
+| `MODEL_MEDIUM` | Medium model for review/polish (default: `google/gemma-3n-4b-it`) | No |
+| `MODEL_LARGE` | Large model for consistency (default: `google/gemma-3-12b-it`) | No |
+| `MODEL_DRAFTER` | Primary drafter model (default: `minimax/minimax-m2.5`) | No |
 
-### Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
-- A [PostgreSQL](https://www.postgresql.org/) database (e.g., [Neon.tech](https://neon.tech/))
-- An [OpenRouter API Key](https://openrouter.ai/)
-- A [Google Cloud Console](https://console.cloud.google.com/) OAuth Client ID
+## Security & Deployment
 
-### Installation Pipeline
+### CORS
 
-1. **Clone the Repository**
+CORS is restricted to origins specified in `ALLOWED_ORIGINS`. In production, set this to your actual domain:
+
+```bash
+ALLOWED_ORIGINS=https://thesium.example.com
+```
+
+### Authentication
+
+- Users authenticate via Google OAuth
+- The server verifies Google ID tokens and resolves a full database user record
+- All API endpoints (except `/api/health`) require authentication
+- Super Admin access is controlled by the `role` field in the User model
+
+### Seeding a Super Admin
+
+1. Set `SEED_SUPER_ADMIN_GOOGLE_SUB` in your `.env` to the Google Subject ID of the user
+2. Run the seed script:
    ```bash
-   git clone https://github.com/Ragulvl/Thesium.git
-   cd Thesium
+   npx tsx -e "
+     const { PrismaClient } = require('@prisma/client');
+     const prisma = new PrismaClient();
+     const sub = process.env.SEED_SUPER_ADMIN_GOOGLE_SUB;
+     if (!sub) { console.error('Set SEED_SUPER_ADMIN_GOOGLE_SUB'); process.exit(1); }
+     prisma.user.updateMany({ where: { googleSub: sub }, data: { role: 'SUPER_ADMIN' } })
+       .then(r => console.log('Updated:', r))
+       .finally(() => prisma.\$disconnect());
+   "
    ```
 
-2. **Install Dependencies**
-   ```bash
-   npm install
-   ```
 
-3. **Configure Environment Protocol**
-   Provision a `.env` file in the root directory mirroring the necessary configuration keys:
-   ```env
-   # Relational Database String
-   DATABASE_URL="postgresql://user:password@hostname/dbname?sslmode=require"
 
-   # Client Identification
-   VITE_GOOGLE_CLIENT_ID="your_google_oauth_client_id"
+### Request Body Limits
 
-   # Artificial Intelligence
-   OPENROUTER_API_KEY="sk-or-v1-..."
+All JSON requests are limited to 1MB by default. Set `BODY_LIMIT` to change this.
 
-   # Server Daemon Config
-   PORT=3001
-   NODE_ENV=development
-   ```
+### Security Headers
 
-4. **Synchronize Database Schema**
-   Initialize the Prisma client and push the schema to your remote Postgres instance:
-   ```bash
-   npx prisma db push
-   npx prisma generate
-   ```
+[Helmet](https://helmetjs.github.io/) is enabled for all responses, setting headers like:
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Strict-Transport-Security` (in production)
 
-5. **Initialize Application Servers**
-   Thesium uses `concurrently` to launch the Vite dev server and the Nodemon Express backend simultaneously:
-   ```bash
-   npm run dev
-   ```
-   *Frontend Client:* `http://localhost:10000` | *Backend API:* `http://localhost:3001`
+### Log Rotation
 
-## 🛡️ Best Practices & Quality Assurance
+In production, configure external log rotation for `server/logs/app.log`:
 
-- **Production Grade Logging:** Express API traffic and critical state mutations are monitored and formatted via `pino` and `pino-http`.
-- **Strict Typing:** The entire technology stack asserts 100% strict TypeScript compliance for enhanced resilience.
-- **Atomic Operations:** Database interactions are safely isolated utilizing Prisma's transactional guarantees.
+```bash
+# Linux example with logrotate
+cat > /etc/logrotate.d/thesium << EOF
+/path/to/thesium/server/logs/app.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+}
+EOF
+```
 
-## 📄 License
+## Scripts
 
-This repository is licensed under the [MIT License](LICENSE).
+| Command | Description |
+|---|---|
+| `npm run dev` | Start frontend (Vite) + backend (Express) concurrently |
+| `npm run build` | Generate Prisma client + build frontend |
+| `npm test` | Run Vitest tests |
+| `npm run lint` | Run ESLint |
+| `npm run typecheck` | TypeScript type checking |
+
+## Architecture
+
+```
+server/
+├── config/          # env, logger, prisma, redis, models
+├── controllers/     # Route handlers (theses, sections, users, admin, export)
+├── middleware/       # auth, metrics, rateLimiter
+├── routes/          # Express router definitions
+├── services/        # AI pipeline, openRouter, scholar, queue, metrics
+├── shared/          # Shared constants (DEFAULT_SECTIONS)
+├── validators/      # Zod input validation schemas
+├── workers/         # BullMQ generation worker
+└── __tests__/       # Vitest unit tests
+
+src/
+├── components/      # React components
+├── contexts/        # Auth, Theme, Toast contexts
+├── pages/           # Route pages
+└── utils/           # Frontend utilities
+```
+
+## CI/CD
+
+GitHub Actions runs on every push/PR to `main`:
+- `npm ci` — install dependencies
+- `npx prisma generate` — generate Prisma client
+- `tsc --noEmit` — TypeScript check
+- `npm run lint` — ESLint
+- `npx vitest run` — unit tests

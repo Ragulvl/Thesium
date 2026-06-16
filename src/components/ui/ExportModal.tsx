@@ -2,26 +2,55 @@ import { X, FileText, File, Download, Sparkles, Check, LucideIcon } from 'lucide
 import { useState } from 'react';
 import Button from './Button';
 import { useToast } from '../../contexts/ToastContext';
+import { useGoogleAuth } from '../../contexts/GoogleAuthContext';
 
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   thesisTitle?: string;
+  thesisId?: string;
 }
 
 type Format = 'pdf' | 'docx';
 type Quality = 'standard' | 'high' | 'print';
 
-export default function ExportModal({ isOpen, onClose, thesisTitle = 'My Thesis' }: ExportModalProps) {
-  const { success } = useToast();
+export default function ExportModal({ isOpen, onClose, thesisTitle = 'My Thesis', thesisId }: ExportModalProps) {
+  const { success, error } = useToast();
+  const { getToken } = useGoogleAuth();
   const [format, setFormat] = useState<Format>('pdf');
   const [quality, setQuality] = useState<Quality>('high');
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
 
-  const handleExport = () => {
+  const handleExport = async () => {
+    if (!thesisId) {
+      error("Cannot export: Thesis ID is missing.");
+      return;
+    }
+    
     setExporting(true);
-    setTimeout(() => {
+    try {
+      const token = getToken();
+      const response = await fetch(`/api/theses/${thesisId}/export?format=${format}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Export failed');
+      }
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${thesisTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      
       setExporting(false);
       setDone(true);
       success(`Successfully exported as ${format.toUpperCase()}`, 'Export Complete');
@@ -29,7 +58,11 @@ export default function ExportModal({ isOpen, onClose, thesisTitle = 'My Thesis'
         setDone(false);
         onClose();
       }, 1500);
-    }, 2200);
+    } catch (err) {
+       console.error(err);
+       setExporting(false);
+       error("Failed to generate export file", "Export Error");
+    }
   };
 
   if (!isOpen) return null;
