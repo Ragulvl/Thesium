@@ -8,6 +8,7 @@ export default defineConfig({
     include: ['server/__tests__/**/*.test.ts'],
     exclude: ['node_modules', 'dist'],
     testTimeout: 10000,
+    setupFiles: ['server/__tests__/setup.ts'],
 
     // Coverage configuration — enforces minimum quality gates
     coverage: {

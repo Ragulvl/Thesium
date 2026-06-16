@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "node",       // node resolution for tsc emit (not bundler)
+    "outDir": "dist/server",
+    "rootDir": "server",
+    "declaration": false,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+
+    /* Strict but no unused-locals/params for build (already enforced in dev) */
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": false                   // emit JS — this is the production build tsconfig
+  },
+  "include": ["server/**/*"],
+  "exclude": ["server/__tests__/**/*", "node_modules"]
+}

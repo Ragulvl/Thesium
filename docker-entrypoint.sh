@@ -8,8 +8,8 @@ ROLE="${THESIUM_ROLE:-api}"
 
 if [ "$ROLE" = "worker" ]; then
   echo "👷 Starting Thesium worker..."
-  exec npx tsx server/worker-entry.ts
+  exec node dist/server/worker-entry.js
 else
   echo "🚀 Starting Thesium API server..."
-  exec npx tsx server/index.ts
+  exec node dist/server/index.js
 fi

@@ -8,9 +8,13 @@
     "dev:frontend": "vite --logLevel silent --clearScreen false",
     "dev:api": "tsx watch server/index.ts",
     "build": "npx prisma generate && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js",
+    "start:worker": "node dist/server/worker-entry.js",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "typecheck:server": "tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run"
   },
   "dependencies": {
