@@ -6,6 +6,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { env, validateEnv } from './config/env.js';
 import { prisma } from './config/prisma.js';
 import redisClient from './config/redis.js';
@@ -16,6 +17,7 @@ import { generationQueue } from './services/queue.js';
 import { serverAdapter as bullBoardAdapter } from './config/bullboard.js';
 
 // Import Routes
+import authRoutes from './routes/auth.routes.js';
 import thesesRoutes from './routes/theses.routes.js';
 import sectionsRoutes from './routes/sections.routes.js';
 import usersRoutes from './routes/users.routes.js';
@@ -44,6 +46,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false, // Required: allows Google scripts to load
 }));
 app.use(cors({ origin: FRONTEND_ORIGINS, credentials: true }));
+app.use(cookieParser());                              // Must run before requireAuth
 app.use(express.json({ limit: process.env.BODY_LIMIT || '1mb' }));
 
 // ── Request Logging ──────────────────────────────────────────────────
@@ -106,7 +109,8 @@ app.get('/api/health', async (_req, res) => {
   });
 });
 
-// ── API Routes ───────────────────────────────────────────────────────
+// ── API Routes ──────────────────────────────────────────────
+app.use('/api/auth', authRoutes);    // Session management (httpOnly cookie)
 app.use('/api/users', usersRoutes);
 app.use('/api/theses', thesesRoutes);
 app.use('/api/theses', sectionsRoutes);

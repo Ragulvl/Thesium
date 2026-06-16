@@ -1,43 +1,39 @@
 /* eslint-disable react-refresh/only-export-components */
-// Why: Added token auto-refresh (45min timer), expiry detection, authenticatedFetch with 401 retry.
+// v3: httpOnly cookie auth.
+//   On login: sends Google credential to POST /api/auth/session (backend sets httpOnly cookie)
+//   On init:  calls GET /api/auth/me to restore session (cookie sent automatically)
+//   All API requests use credentials: 'include' so the browser sends the cookie
+//   No sensitive token is stored in localStorage or accessible to JavaScript
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { logger } from '../utils/logger';
 import { jwtDecode } from 'jwt-decode';
 
-const TOKEN_KEY = 'thesium_google_token';
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
-/** How often to check token expiry (ms) */
-const REFRESH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
-/** Refresh token this far before expiry (ms) */
-const REFRESH_BUFFER_MS = 10 * 60 * 1000; // 10 minutes before expiry
-
 export interface GoogleUser {
+  id: string;
   email: string;
   name: string;
   picture: string;
-  sub: string;
-  exp?: number;
+  role: string;
+  tier?: string;
 }
 
 interface AuthContextType {
   user: GoogleUser | null;
   login: (credential: string) => Promise<void>;
-  logout: () => void;
-  getToken: () => string | null;
-  /** Wrapper for fetch that auto-attaches auth header and retries on 401 */
-  authenticatedFetch: (url: string, options?: RequestInit) => Promise<Response>;
+  logout: () => Promise<void>;
+  /** @deprecated — returns null (no token in JS). Use credentials:'include' on all fetches. */
+  getToken: () => null;
   loading: boolean;
-  /** True when a silent re-auth is in progress */
   refreshing: boolean;
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   login: async () => {},
-  logout: () => {},
+  logout: async () => {},
   getToken: () => null,
-  authenticatedFetch: () => Promise.reject(new Error('AuthContext not initialized')),
   loading: true,
   refreshing: false,
 });
@@ -48,37 +44,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [refreshing, setRefreshing] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Helpers ──────────────────────────────────────────────────────
-  const clearAuth = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY);
-    setUser(null);
-    if (refreshTimerRef.current) {
-      clearInterval(refreshTimerRef.current);
-      refreshTimerRef.current = null;
-    }
-  }, []);
-
-  const isTokenExpired = useCallback((token: string): boolean => {
-    try {
-      const decoded = jwtDecode<GoogleUser>(token);
-      if (!decoded.exp) return false;
-      // Expired if within the buffer window
-      return decoded.exp * 1000 < Date.now() + REFRESH_BUFFER_MS;
-    } catch {
-      return true;
-    }
-  }, []);
-
-  const getTimeUntilExpiry = useCallback((token: string): number => {
-    try {
-      const decoded = jwtDecode<GoogleUser>(token);
-      if (!decoded.exp) return Infinity;
-      return decoded.exp * 1000 - Date.now();
-    } catch {
-      return 0;
-    }
-  }, []);
-
   // ── Silent Re-auth via Google One Tap ───────────────────────────
   const triggerSilentReauth = useCallback((): Promise<string | null> => {
     return new Promise((resolve) => {
@@ -87,171 +52,114 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         resolve(null);
         return;
       }
-
       setRefreshing(true);
-
-      // Initialize with auto_select to try silent sign-in
       window.google.accounts.id.initialize({
         client_id: CLIENT_ID,
         callback: (response: { credential: string }) => {
           setRefreshing(false);
-          if (response.credential) {
-            // Update stored token and user
-            localStorage.setItem(TOKEN_KEY, response.credential);
-            const decoded = jwtDecode<GoogleUser>(response.credential);
-            setUser(decoded);
-            logger.info('Token silently refreshed');
-            resolve(response.credential);
-          } else {
-            resolve(null);
-          }
+          resolve(response.credential ? response.credential : null);
         },
         auto_select: true,
       });
-
-      // Trigger the One Tap prompt (auto_select will try silent if user previously consented)
       window.google.accounts.id.prompt((notification: any) => {
         if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
           setRefreshing(false);
-          logger.warn({ reason: notification.getNotDisplayedReason?.() || notification.getSkippedReason?.() },
-            'Silent re-auth failed — user may need to re-login');
+          logger.warn('Silent re-auth not displayed or skipped');
           resolve(null);
         }
       });
-
-      // Timeout: if things get stuck, resolve null after 10s
-      setTimeout(() => {
-        setRefreshing(false);
-        resolve(null);
-      }, 10_000);
+      setTimeout(() => { setRefreshing(false); resolve(null); }, 10_000);
     });
   }, []);
 
-  // ── Auto-Refresh Timer ──────────────────────────────────────────
-  const startRefreshTimer = useCallback(() => {
-    // Clear any existing timer
-    if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-
-    refreshTimerRef.current = setInterval(async () => {
-      const token = localStorage.getItem(TOKEN_KEY);
-      if (!token) return;
-
-      const timeLeft = getTimeUntilExpiry(token);
-      logger.info({ timeLeftMin: Math.round(timeLeft / 60000) }, 'Token refresh check');
-
-      if (timeLeft < REFRESH_BUFFER_MS) {
-        logger.info('Token expiring soon — attempting silent refresh');
-        const newToken = await triggerSilentReauth();
-        if (!newToken) {
-          logger.warn('Silent refresh failed — token will expire. User needs to re-login.');
-        }
-      }
-    }, REFRESH_CHECK_INTERVAL_MS);
-  }, [getTimeUntilExpiry, triggerSilentReauth]);
-
-  // ── Init: Restore session from localStorage ─────────────────────
+  // ── Restore session from backend on page load ────────────────────
   useEffect(() => {
-    const token = localStorage.getItem(TOKEN_KEY);
-    if (token) {
+    const restore = async () => {
       try {
-        if (isTokenExpired(token)) {
-          throw new Error('Token has expired');
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        if (res.ok) {
+          const profile = await res.json();
+          setUser(profile);
+
+          // Start a periodic check — if /api/auth/me returns 401, trigger re-auth
+          if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+          refreshTimerRef.current = setInterval(async () => {
+            const check = await fetch('/api/auth/me', { credentials: 'include' }).catch(() => null);
+            if (!check || check.status === 401) {
+              logger.info('Session expired — attempting silent re-auth');
+              const newCred = await triggerSilentReauth();
+              if (newCred) {
+                // Re-establish cookie with fresh credential
+                const refreshRes = await fetch('/api/auth/session', {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ credential: newCred }),
+                });
+                if (refreshRes.ok) {
+                  const refreshed = await refreshRes.json();
+                  setUser(refreshed);
+                } else {
+                  setUser(null);
+                }
+              } else {
+                setUser(null);
+              }
+            }
+          }, 5 * 60 * 1000); // Check every 5 minutes
         }
-
-        const decoded = jwtDecode<GoogleUser>(token);
-        setUser(decoded);
-        startRefreshTimer();
-
-        // Sync with backend on fresh load
-        fetch('/api/users/sync', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          }
-        }).then(res => {
-          if (!res.ok && (res.status === 401 || res.status === 403)) {
-            clearAuth();
-          }
-        }).catch(e => logger.error({ err: e }, 'Failed to sync user via token'));
-      } catch {
-        clearAuth();
+      } catch (e) {
+        logger.warn({ err: e }, 'Session restore failed — user not authenticated');
+      } finally {
+        setLoading(false);
       }
-    }
-    setLoading(false);
-  }, [isTokenExpired, clearAuth, startRefreshTimer]);
-
-  // Cleanup timer on unmount
-  useEffect(() => {
-    return () => {
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
     };
-  }, []);
+    restore();
+    return () => { if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); };
+  }, [triggerSilentReauth]);
 
   // ── Login ───────────────────────────────────────────────────────
   const login = async (credential: string) => {
     try {
-      const decoded = jwtDecode<GoogleUser>(credential);
-      localStorage.setItem(TOKEN_KEY, credential);
-      setUser(decoded);
-      startRefreshTimer();
+      // Decode locally ONLY for display (sub, name, email, picture)
+      const decoded = jwtDecode<{ email: string; name: string; picture: string; sub: string }>(credential);
+      logger.info({ email: decoded.email }, 'Logging in');
 
-      // Sync user with database
-      await fetch('/api/users/sync', {
+      // Send to backend — backend verifies and sets httpOnly cookie
+      const res = await fetch('/api/auth/session', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${credential}`
-        }
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential }),
       });
+
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({}));
+        throw new Error(error || 'Login failed');
+      }
+
+      const profile = await res.json();
+      setUser(profile);
     } catch (e) {
-      logger.error({ err: e }, 'Failed to decode JWT or sync user');
+      logger.error({ err: e }, 'Login failed');
+      throw e;
     }
   };
 
   // ── Logout ──────────────────────────────────────────────────────
-  const logout = () => {
-    clearAuth();
-    // Also revoke Google session
-    if (window.google?.accounts?.id) {
-      window.google.accounts.id.disableAutoSelect();
-    }
+  const logout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
+    setUser(null);
+    if (refreshTimerRef.current) { clearInterval(refreshTimerRef.current); refreshTimerRef.current = null; }
+    if (window.google?.accounts?.id) window.google.accounts.id.disableAutoSelect();
   };
 
-  // ── Get Token ───────────────────────────────────────────────────
-  const getToken = () => localStorage.getItem(TOKEN_KEY);
-
-  // ── Authenticated Fetch (401 retry) ─────────────────────────────
-  const authenticatedFetch = useCallback(async (url: string, options: RequestInit = {}): Promise<Response> => {
-    const token = localStorage.getItem(TOKEN_KEY);
-    if (!token) throw new Error('Not authenticated');
-
-    const headers = new Headers(options.headers);
-    headers.set('Authorization', `Bearer ${token}`);
-
-    const response = await fetch(url, { ...options, headers });
-
-    // If 401, attempt silent refresh and retry once
-    if (response.status === 401) {
-      logger.info('Got 401 — attempting silent token refresh');
-      const newToken = await triggerSilentReauth();
-
-      if (newToken) {
-        const retryHeaders = new Headers(options.headers);
-        retryHeaders.set('Authorization', `Bearer ${newToken}`);
-        return fetch(url, { ...options, headers: retryHeaders });
-      } else {
-        // Refresh failed — clear auth and throw
-        clearAuth();
-        throw new Error('Session expired. Please log in again.');
-      }
-    }
-
-    return response;
-  }, [triggerSilentReauth, clearAuth]);
+  // getToken is kept for backward compat with any components that call it
+  // Returns null — callers should use credentials:'include' instead
+  const getToken = () => null;
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, getToken, authenticatedFetch, loading, refreshing }}>
+    <AuthContext.Provider value={{ user, login, logout, getToken, loading, refreshing }}>
       {children}
     </AuthContext.Provider>
   );

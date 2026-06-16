@@ -47,7 +47,7 @@ export default function ThesisWorkspace() {
   const { success, error: showError } = useToast();
   const navigate = useNavigate();
   const { id: thesisId } = useParams<{ id: string }>();
-  const { getToken } = useGoogleAuth();
+  const { getToken: _getToken } = useGoogleAuth(); // kept for compat — not used directly
 
   const [thesis, setThesis] = useState<ThesisData | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
@@ -63,13 +63,9 @@ export default function ThesisWorkspace() {
 
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const getHeaders = useCallback(() => {
-    const token = getToken();
-    return {
-      'Content-Type': 'application/json',
-      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-    };
-  }, [getToken]);
+  const getHeaders = useCallback(() => ({
+    'Content-Type': 'application/json',
+  }), []);
 
   // ── Load thesis + sections from API ──
   useEffect(() => {
@@ -80,13 +76,13 @@ export default function ThesisWorkspace() {
         const headers = getHeaders();
 
         // Fetch thesis metadata
-        const thesesRes = await fetch('/api/theses', { headers });
+        const thesesRes = await fetch('/api/theses', { headers, credentials: 'include' });
         const allTheses = await thesesRes.json();
         const found = allTheses.find((t: any) => t.id === thesisId);
         if (found) setThesis(found);
 
         // Fetch sections (auto-seeds if first visit)
-        const secRes = await fetch(`/api/theses/${thesisId}/sections`, { headers });
+        const secRes = await fetch(`/api/theses/${thesisId}/sections`, { headers, credentials: 'include' });
         const secData = await secRes.json();
         if (secData && secData.length > 0) {
           setSections(secData.map((s: any) => ({
@@ -98,7 +94,7 @@ export default function ThesisWorkspace() {
         }
 
         // Load existing audit report if one was previously run
-        const auditRes = await fetch(`/api/theses/${thesisId}/audit`, { headers });
+        const auditRes = await fetch(`/api/theses/${thesisId}/audit`, { headers, credentials: 'include' });
         if (auditRes.ok) {
           const report = await auditRes.json();
           setAuditReport(report);
@@ -151,6 +147,7 @@ export default function ThesisWorkspace() {
       fetch(`/api/theses/${thesisId}/sections/${activeId}`, {
         method: 'PATCH',
         headers: getHeaders(),
+        credentials: 'include',
         body: JSON.stringify({ content: val, wordCount: newWordCount }),
       }).catch(e => logger.error({ err: e }, 'Auto-save failed'));
     }, 1000);
@@ -163,7 +160,7 @@ export default function ThesisWorkspace() {
       await new Promise(r => setTimeout(r, 3000));
       try {
         const headers = getHeaders();
-        const res = await fetch(`/api/jobs/${jobId}`, { headers });
+        const res = await fetch(`/api/jobs/${jobId}`, { headers, credentials: 'include' });
         if (!res.ok) continue;
         const { state } = await res.json();
         if (state === 'completed') return 'completed';
@@ -179,7 +176,7 @@ export default function ThesisWorkspace() {
   const fetchSection = useCallback(async (sectionId: string): Promise<Section | null> => {
     try {
       const headers = getHeaders();
-      const res = await fetch(`/api/theses/${thesisId}/sections`, { headers });
+      const res = await fetch(`/api/theses/${thesisId}/sections`, { headers, credentials: 'include' });
       const all: any[] = await res.json();
       const sec = all.find((s: any) => s.id === sectionId);
       if (!sec) return null;
@@ -202,6 +199,7 @@ export default function ThesisWorkspace() {
       const res = await fetch(`/api/theses/${thesisId}/sections/${sectionId}/generate`, {
         method: 'POST',
         headers: getHeaders(),
+        credentials: 'include',
       });
       if (!res.ok) throw new Error('Failed to queue generation');
       const { jobId } = await res.json();
@@ -247,6 +245,7 @@ export default function ThesisWorkspace() {
       const res = await fetch(`/api/theses/${thesisId}/generate-all`, {
         method: 'POST',
         headers: getHeaders(),
+        credentials: 'include',
       });
       if (!res.ok) {
         const { error } = await res.json().catch(() => ({}));
@@ -292,6 +291,7 @@ export default function ThesisWorkspace() {
       const res = await fetch(`/api/theses/${thesisId}/audit`, {
         method: 'POST',
         headers: getHeaders(),
+        credentials: 'include',
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -305,7 +305,7 @@ export default function ThesisWorkspace() {
       if (result === 'timeout') { showError('Audit timed out. Try again shortly.', 'Timeout'); return; }
 
       // 3. Fetch the stored report
-      const reportRes = await fetch(`/api/theses/${thesisId}/audit`, { headers: getHeaders() });
+      const reportRes = await fetch(`/api/theses/${thesisId}/audit`, { headers: getHeaders(), credentials: 'include' });
       if (!reportRes.ok) throw new Error('Failed to fetch audit report');
       const report = await reportRes.json();
       setAuditReport(report);

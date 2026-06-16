@@ -2,10 +2,13 @@
 // and enabling role-based access control.
 // Fix: Use GOOGLE_CLIENT_ID (server-side) with fallback to VITE_GOOGLE_CLIENT_ID.
 //      Removed 'dummy_client_id' fallback — a missing CLIENT_ID now fails fast.
+// v2: requireAuth accepts httpOnly cookie (SESSION_COOKIE) OR Authorization: Bearer.
+//     Cookie takes priority — browser clients use cookie, API clients use header.
 import { Request, Response, NextFunction } from 'express';
 import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../config/prisma.js';
 import { Role } from '@prisma/client';
+import { SESSION_COOKIE } from '../controllers/auth.controller.js';
 
 // Prefer the server-side GOOGLE_CLIENT_ID env var; fall back to the VITE_ variant
 // for projects that share a single variable. If neither is set, fail loudly.
@@ -42,13 +45,17 @@ export const requireAuth = async (req: AuthenticatedRequest, res: Response, next
     return res.status(503).json({ error: 'Authentication service misconfigured' });
   }
 
+  // Priority 1: httpOnly session cookie (browser clients)
+  // Priority 2: Authorization: Bearer header (mobile / API clients)
+  const cookieToken: string | undefined = (req as any).cookies?.[SESSION_COOKIE];
   const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const token = cookieToken || bearerToken;
+
+  if (!token) {
     return res.status(401).json({ error: 'Unauthorized: Missing token' });
   }
-
-  const token = authHeader.split(' ')[1];
 
   try {
     const ticket = await client.verifyIdToken({
