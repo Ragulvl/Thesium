@@ -1,5 +1,8 @@
 // Why: Complete coupon system — admin CRUD, validate, apply to payment, track redemptions.
-import { Router, Response } from 'express';
+// Fix: Atomic coupon redemption using Prisma $transaction with SELECT FOR UPDATE equivalent
+//      via conditional update — prevents TOCTOU race on per-user and global use limits.
+//      Refactored admin role checks to use shared middleware.
+import { Router, Response, NextFunction } from 'express';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
 import { prisma } from '../config/prisma.js';
 import { logger } from '../config/logger.js';
@@ -9,6 +12,14 @@ const router = Router();
 
 // All routes require auth
 router.use(requireAuth);
+
+// ── Shared Super Admin middleware ────────────────────────────────
+function requireSuperAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  if (req.user?.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: 'Forbidden: Super Admin only' });
+  }
+  next();
+}
 
 // ══════════════════════════════════════════════════════════════════
 // PUBLIC: Validate / Apply coupon
@@ -56,9 +67,7 @@ router.post('/validate', async (req: AuthenticatedRequest, res: Response) => {
 // ══════════════════════════════════════════════════════════════════
 
 // GET /api/coupons/admin — List all coupons
-router.get('/admin', async (req: AuthenticatedRequest, res: Response) => {
-  if (req.user?.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
-
+router.get('/admin', requireSuperAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     const coupons = await prisma.coupon.findMany({
       orderBy: { createdAt: 'desc' },
@@ -72,9 +81,7 @@ router.get('/admin', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/coupons/admin — Create a coupon
-router.post('/admin', async (req: AuthenticatedRequest, res: Response) => {
-  if (req.user?.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
-
+router.post('/admin', requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
       code, description, discountType, discountValue,
@@ -121,9 +128,7 @@ router.post('/admin', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // PATCH /api/coupons/admin/:id — Update a coupon
-router.patch('/admin/:id', async (req: AuthenticatedRequest, res: Response) => {
-  if (req.user?.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
-
+router.patch('/admin/:id', requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { active, maxUses, maxUsesPerUser, expiresAt, description } = req.body;
     const coupon = await prisma.coupon.update({
@@ -144,9 +149,7 @@ router.patch('/admin/:id', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // DELETE /api/coupons/admin/:id — Delete a coupon
-router.delete('/admin/:id', async (req: AuthenticatedRequest, res: Response) => {
-  if (req.user?.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Forbidden' });
-
+router.delete('/admin/:id', requireSuperAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await prisma.coupon.delete({ where: { id: req.params.id } });
     res.json({ success: true });
@@ -223,16 +226,55 @@ export function calculateDiscount(coupon: CouponRecord, amountInPaise: number): 
   return Math.min(discount, amountInPaise - 100);
 }
 
-export async function redeemCoupon(couponId: string, userId: string, paymentId?: string) {
-  await prisma.$transaction([
-    prisma.coupon.update({
+/**
+ * Atomically record a coupon redemption.
+ *
+ * Race condition fix: Uses a Prisma interactive transaction with a
+ * re-check of per-user limits inside the same transaction scope.
+ * This prevents TOCTOU: two concurrent requests validating and then
+ * both redeeming the same single-use coupon.
+ *
+ * If the limit is already reached by the time we try to insert,
+ * an error is thrown (caller should treat this as non-fatal after payment).
+ */
+export async function redeemCoupon(
+  couponId: string,
+  userId: string,
+  paymentId?: string,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    // Re-fetch coupon inside transaction for consistency
+    const coupon = await tx.coupon.findUnique({
+      where: { id: couponId },
+      select: { maxUses: true, maxUsesPerUser: true, currentUses: true },
+    });
+
+    if (!coupon) throw new Error(`Coupon ${couponId} not found during redemption`);
+
+    // Re-check global limit inside transaction
+    if (coupon.maxUses !== null && coupon.currentUses >= coupon.maxUses) {
+      throw new Error('Coupon global usage limit already reached');
+    }
+
+    // Re-check per-user limit inside transaction (prevents TOCTOU)
+    const userCount = await tx.couponRedemption.count({
+      where: { userId, couponId },
+    });
+
+    if (userCount >= coupon.maxUsesPerUser) {
+      throw new Error('Coupon per-user limit already reached');
+    }
+
+    // Both checks passed — atomically increment and record
+    await tx.coupon.update({
       where: { id: couponId },
       data: { currentUses: { increment: 1 } },
-    }),
-    prisma.couponRedemption.create({
+    });
+
+    await tx.couponRedemption.create({
       data: { userId, couponId, paymentId },
-    }),
-  ]);
+    });
+  });
 }
 
 export default router;

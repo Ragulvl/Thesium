@@ -1,13 +1,19 @@
 # ═══════════════════════════════════════════════════════════════════
 # Thesium — Docker Compose
+#
 # Usage:
-#   Development: docker compose up
-#   Production:  docker compose --env-file .env.production up -d
-#   Scale workers: docker compose up -d --scale worker=3
+#   Local dev:       docker compose up
+#   Production:      docker compose --env-file .env.production up -d
+#   Scale workers:   docker compose up -d --scale worker=3
+#
+# Security notes:
+#   - Postgres and Redis ports are NOT exposed to the host in production.
+#     Use a separate docker-compose.override.yml to expose them locally.
+#   - Set GOOGLE_CLIENT_ID (server-side) in addition to VITE_GOOGLE_CLIENT_ID.
 # ═══════════════════════════════════════════════════════════════════
 
 services:
-  # ── PostgreSQL ─────────────────────────────────────
+  # ── PostgreSQL ─────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -15,8 +21,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-thesium}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-thesium_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-thesium}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # NOTE: Port is NOT mapped to host by default — only accessible within
+    # the Docker network. To access locally, add a docker-compose.override.yml
+    # with: services: postgres: ports: ["5432:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -30,12 +37,13 @@ services:
           cpus: "1.0"
           memory: 512M
 
-  # ── Redis ──────────────────────────────────────────
+  # ── Redis ───────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # Enable append-only file persistence so queued jobs survive container restarts.
+    command: redis-server --appendonly yes --appendfsync everysec
+    # NOTE: Port is NOT mapped to host by default (same as postgres above)
     volumes:
       - redis_data:/data
     healthcheck:
@@ -49,7 +57,7 @@ services:
           cpus: "0.5"
           memory: 256M
 
-  # ── Thesium API Server ─────────────────────────────
+  # ── Thesium API Server ──────────────────────────────────────────
   app:
     build:
       context: .
@@ -63,8 +71,16 @@ services:
       THESIUM_ROLE: api
       DATABASE_URL: postgresql://${POSTGRES_USER:-thesium}:${POSTGRES_PASSWORD:-thesium_dev_password}@postgres:5432/${POSTGRES_DB:-thesium}
       REDIS_URL: redis://redis:6379
+      # Single primary key
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
+      # Optional: comma-separated list for multi-key rotation
+      OPENROUTER_API_KEYS: ${OPENROUTER_API_KEYS:-}
+      # Auth: GOOGLE_CLIENT_ID for server-side verification
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-${VITE_GOOGLE_CLIENT_ID:-}}
+      VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+      # Razorpay
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:10000}
       BODY_LIMIT: ${BODY_LIMIT:-1mb}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -89,8 +105,8 @@ services:
           cpus: "1.0"
           memory: 512M
 
-  # ── Thesium Background Worker ──────────────────────
-  # Separate from API so queue jobs can't block HTTP requests.
+  # ── Thesium Background Worker ───────────────────────────────────
+  # Separate from API so queue jobs cannot block HTTP requests.
   # Scale independently: docker compose up -d --scale worker=3
   worker:
     build:

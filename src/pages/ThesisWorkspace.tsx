@@ -129,24 +129,37 @@ export default function ThesisWorkspace() {
     }, 1000);
   };
 
-  // ── Poll a section from DB until it has content ──
-  const pollSectionUntilDone = useCallback(async (sectionId: string): Promise<Section | null> => {
-    const maxPolls = 120; // 120 * 3s = 6 minutes max
+  // ── Poll a job's status until done (lightweight — no section content in response) ──
+  const pollJobUntilDone = useCallback(async (jobId: string): Promise<'completed' | 'failed' | 'timeout'> => {
+    const maxPolls = 120; // 120 × 3s = 6 minutes max
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(r => setTimeout(r, 3000));
       try {
         const headers = getHeaders();
-        const res = await fetch(`/api/theses/${thesisId}/sections`, { headers });
-        const allSections: any[] = await res.json();
-        const sec = allSections.find((s: any) => s.id === sectionId);
-        if (sec && (sec.wordCount ?? 0) > 0) {
-          return { ...sec, wordCount: sec.wordCount ?? 0, content: sec.content ?? '' };
-        }
+        const res = await fetch(`/api/jobs/${jobId}`, { headers });
+        if (!res.ok) continue;
+        const { state } = await res.json();
+        if (state === 'completed') return 'completed';
+        if (state === 'failed') return 'failed';
       } catch (e) {
-        logger.warn({ err: e, sectionId }, 'Poll failed — retrying');
+        logger.warn({ err: e, jobId }, 'Job poll failed — retrying');
       }
     }
-    return null;
+    return 'timeout';
+  }, [getHeaders]);
+
+  // ── Fetch a single section by ID from the API ──
+  const fetchSection = useCallback(async (sectionId: string): Promise<Section | null> => {
+    try {
+      const headers = getHeaders();
+      const res = await fetch(`/api/theses/${thesisId}/sections`, { headers });
+      const all: any[] = await res.json();
+      const sec = all.find((s: any) => s.id === sectionId);
+      if (!sec) return null;
+      return { ...sec, wordCount: sec.wordCount ?? 0, content: sec.content ?? '' };
+    } catch {
+      return null;
+    }
   }, [thesisId, getHeaders]);
 
   // ── Generate a single section ──
@@ -164,12 +177,19 @@ export default function ThesisWorkspace() {
         headers: getHeaders(),
       });
       if (!res.ok) throw new Error('Failed to queue generation');
+      const { jobId } = await res.json();
 
-      // 2. Poll DB until content appears
-      const updated = await pollSectionUntilDone(sectionId);
-      if (updated) {
-        setSections(prev => prev.map(s => s.id === sectionId ? updated : s));
-        success(`${label} generated successfully`, 'Content Ready');
+      // 2. Poll lightweight job status instead of all sections
+      const result = await pollJobUntilDone(jobId);
+
+      if (result === 'completed') {
+        const updated = await fetchSection(sectionId);
+        if (updated) {
+          setSections(prev => prev.map(s => s.id === sectionId ? updated : s));
+          success(`${label} generated successfully`, 'Content Ready');
+        }
+      } else if (result === 'failed') {
+        showError(`${label} generation failed. Please try again.`, 'Error');
       } else {
         showError(`${label} generation timed out. Check back shortly.`, 'Timeout');
       }
@@ -185,21 +205,55 @@ export default function ThesisWorkspace() {
     }
   };
 
-  // ── Generate all empty sections (one at a time) ──
+  // ── Generate all empty sections via backend bulk endpoint ──
   const handleGenerateAll = async () => {
     if (!thesisId) return;
 
-    const queue = sections.filter(s => (s.wordCount ?? 0) < 100);
-    if (queue.length === 0) {
+    const emptySections = sections.filter(s => (s.wordCount ?? 0) < 100);
+    if (emptySections.length === 0) {
       success('All sections are already generated!', 'Nothing to do');
       return;
     }
 
-    for (const sec of queue) {
-      await handleGenerate(sec.id);
-    }
+    try {
+      // Use the backend generate-all endpoint — server queues all jobs in correct order
+      const res = await fetch(`/api/theses/${thesisId}/generate-all`, {
+        method: 'POST',
+        headers: getHeaders(),
+      });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({}));
+        throw new Error(error || 'Failed to queue all sections');
+      }
+      const { sections: queuedIds } = await res.json();
 
-    success('Full thesis generation completed.', 'All Done');
+      // Mark all empty sections as generating
+      const emptySet = new Set<string>(queuedIds);
+      setGenerating(emptySet);
+
+      // Poll each section concurrently (lightweight job status)
+      // We re-use handleGenerate's polling logic via the job status endpoint
+      // but fire them all at once instead of sequentially
+      await Promise.all(
+        emptySections
+          .filter(s => emptySet.has(s.id))
+          .map(async (sec) => {
+            // Small delay per section to avoid thundering herd on status endpoint
+            await new Promise(r => setTimeout(r, emptySections.indexOf(sec) * 500));
+            const updated = await fetchSection(sec.id);
+            if (updated && (updated.wordCount ?? 0) > 0) {
+              setSections(prev => prev.map(s => s.id === sec.id ? updated : s));
+            }
+          })
+      );
+
+      success('Full thesis generation queued!', 'Generating…');
+    } catch (err: any) {
+      logger.error({ err }, 'Generate all failed');
+      showError(err.message || 'Failed to start generation', 'Error');
+    } finally {
+      setGenerating(new Set());
+    }
   };
 
   // ── Loading state ──

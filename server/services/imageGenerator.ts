@@ -1,15 +1,47 @@
 // Image generation service — uses LLM to generate SVG diagrams for thesis figures.
-// No external API needed — the LLM creates SVG code, stored as base64 SVG.
-// Export controller handles rendering SVG in PDF (via PDFKit) and DOCX (via sharp if available).
+// Security fix: LLM-returned SVG is now sanitized before storage to remove
+// script tags, event handlers, external references (SSRF), and foreignObject.
 import { callModelWithRetry } from './openRouter.js';
 import { MODELS } from '../config/models.js';
 import { logger } from '../config/logger.js';
 
 export interface GeneratedImage {
-  base64: string;       // base64-encoded SVG
+  base64: string;       // base64-encoded sanitized SVG
   prompt: string;       // the prompt used
   caption: string;      // short caption for the image
   isSvg: true;          // flag for export to handle correctly
+}
+
+/**
+ * Strip dangerous elements and attributes from an SVG string.
+ *
+ * We do NOT use a full DOM parser here to avoid a heavy dependency.
+ * Instead we apply targeted regex removals for the specific attack
+ * vectors that are relevant in this context (LLM-generated SVGs):
+ *
+ *  - <script> blocks
+ *  - on* event handler attributes (onclick, onload, etc.)
+ *  - href / xlink:href pointing to external URLs or data: URIs
+ *  - <foreignObject> (allows HTML injection inside SVG)
+ *  - <use> with external references
+ */
+function sanitizeSvg(svg: string): string {
+  return svg
+    // Remove <script> blocks entirely
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    // Remove on* event handlers (onclick, onload, onmouseover, etc.)
+    .replace(/\son\w+\s*=\s*["'][^"']*["']/gi, '')
+    .replace(/\son\w+\s*=\s*[^\s>]*/gi, '')
+    // Remove javascript: URI schemes
+    .replace(/javascript\s*:/gi, 'blocked:')
+    // Remove data: URI references (can embed scripts)
+    .replace(/(?:href|src|xlink:href)\s*=\s*["']data:[^"']*["']/gi, '')
+    // Remove external http(s) href references (SSRF via <image href="...">)
+    .replace(/(?:href|src|xlink:href)\s*=\s*["']https?:\/\/[^"']*["']/gi, '')
+    // Remove <foreignObject> (HTML injection)
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+    // Remove <use> with external fragment references
+    .replace(/<use[^>]+xlink:href\s*=\s*["'][^#][^"']*["'][^>]*\/?>/gi, '');
 }
 
 /**
@@ -49,6 +81,7 @@ OUTPUT RULES (only if NOT skipping):
 1. Output ONLY valid SVG code. No markdown fences, no explanation.
 2. Start with: <svg viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
 3. First element must be: <rect width="800" height="500" fill="white"/>
+4. Use ONLY static SVG — no <script>, no on* attributes, no external URLs.
 
 STYLE:
 - Boxes: <rect rx="8" fill="COLOR" stroke="none"/>
@@ -84,9 +117,18 @@ SVG:`,
       svg = svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
     }
 
+    // Sanitize before storage — removes scripts, event handlers, external refs
+    svg = sanitizeSvg(svg);
+
+    // Final validation — must still look like an SVG after sanitization
+    if (!svg.includes('<svg') || !svg.includes('</svg>')) {
+      logger.warn(`SVG failed post-sanitization validation for "${subTitle}" — skipping`);
+      return null;
+    }
+
     // Extract caption
     const captionMatch = text.match(/CAPTION:\s*(.+)/i);
-    const caption = captionMatch ? captionMatch[1].trim() : `Figure: ${subTitle}`;
+    const caption = captionMatch ? captionMatch[1].trim().slice(0, 200) : `Figure: ${subTitle}`;
 
     const base64 = Buffer.from(svg, 'utf-8').toString('base64');
 

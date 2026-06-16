@@ -407,14 +407,14 @@ ${evidenceInstruction}
       }
     });
 
-    // Record usage for this subsection (cost tracking for monetization)
+    // Record usage for this subsection (cost + token tracking)
     await prisma.usage.create({
       data: {
         userId: thesis.userId,
         thesisId,
         sectionId,
         costUsd: draftRes.estimatedCostUsd + reviewRes.estimatedCostUsd + polishRes.estimatedCostUsd,
-        tokens: 0, // Token-level tracking not available from OpenRouter — cost is the primary metric
+        tokens: draftRes.totalTokens + reviewRes.totalTokens + polishRes.totalTokens,
         model: MODELS.DRAFTER,
         stage: `subsection:${subTitle}`,
       }

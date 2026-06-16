@@ -1,0 +1,19 @@
+# ══════════════════════════════════════════════════════════════════
+# docker-compose.override.yml — Local Development Overrides
+#
+# This file is automatically merged with docker-compose.yml when you
+# run `docker compose up` locally. It re-exposes the database and Redis
+# ports so you can connect from your host machine (pgAdmin, redis-cli).
+#
+# This file should NOT be deployed to production.
+# Add it to .gitignore if you have developer-specific overrides.
+# ══════════════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT:-6379}:6379"

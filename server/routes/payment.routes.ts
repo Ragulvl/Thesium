@@ -1,4 +1,6 @@
 // Why: Razorpay payment routes with coupon support — order creation, verification, coupon discount application.
+// Fixes: null-guard on RAZORPAY_KEY_SECRET (prevents all signatures verifying when key missing),
+//        removed _couponId from response (internal ID exposure), hardened error paths.
 import { Router, Request, Response } from 'express';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
@@ -9,7 +11,7 @@ import { validateCoupon, calculateDiscount, redeemCoupon } from './coupon.routes
 
 const router = Router();
 
-// ── Pricing Plans ────────────────────────────────────────────────────
+// ── Pricing Plans ────────────────────────────────────────────────
 export const PLANS = {
   starter: {
     name: 'Starter',
@@ -33,8 +35,8 @@ export const PLANS = {
 
 type PlanId = keyof typeof PLANS;
 
-// ── Razorpay Instance ────────────────────────────────────────────────
-function getRazorpay() {
+// ── Razorpay Instance ────────────────────────────────────────────
+function getRazorpay(): Razorpay {
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keyId || !keySecret) {
@@ -43,7 +45,19 @@ function getRazorpay() {
   return new Razorpay({ key_id: keyId, key_secret: keySecret });
 }
 
-// ── GET /api/payments/plans — List available plans ───────────────────
+/**
+ * Get and validate the Razorpay webhook secret.
+ * Throws if missing — callers must handle and return 500.
+ */
+function getRazorpaySecret(): string {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret) {
+    throw new Error('RAZORPAY_KEY_SECRET is not configured');
+  }
+  return secret;
+}
+
+// ── GET /api/payments/plans — List available plans ───────────────
 router.get('/plans', (_req: Request, res: Response) => {
   const plans = Object.entries(PLANS).map(([id, plan]) => ({
     id,
@@ -56,7 +70,7 @@ router.get('/plans', (_req: Request, res: Response) => {
   res.json(plans);
 });
 
-// ── POST /api/payments/create-order — Create Razorpay order ─────────
+// ── POST /api/payments/create-order — Create Razorpay order ─────
 router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { planId, couponCode } = req.body as { planId: string; couponCode?: string };
@@ -68,7 +82,6 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
     const plan = PLANS[planId as PlanId];
     let finalAmount: number = plan.priceInr;
     let appliedCouponCode: string | null = null;
-    let couponId: string | null = null;
 
     // Apply coupon if provided
     if (couponCode) {
@@ -82,7 +95,6 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
       const discount = calculateDiscount(validation.coupon!, plan.priceInr);
       finalAmount = plan.priceInr - discount;
       appliedCouponCode = code;
-      couponId = validation.coupon!.id;
 
       logger.info({
         userId: req.user!.id, planId, couponCode: code,
@@ -98,16 +110,15 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
     const order = await razorpay.orders.create({
       amount: finalAmount,
       currency: 'INR',
-      receipt: `thesium_${req.user!.id}_${Date.now()}`,
+      receipt: `thesium_${req.user!.id.slice(0, 8)}_${Date.now()}`,
       notes: {
         userId: req.user!.id,
         planId,
         couponCode: appliedCouponCode || '',
-        userEmail: req.user!.email || '',
       },
     });
 
-    // Save pending payment with coupon info
+    // Save pending payment record (coupon tracked server-side, not exposed to client)
     await prisma.payment.create({
       data: {
         userId: req.user!.id,
@@ -126,6 +137,8 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
       amount: finalAmount, coupon: appliedCouponCode,
     }, 'Razorpay order created');
 
+    // NOTE: _couponId is intentionally NOT returned — the verify endpoint
+    // reads the coupon from the stored payment record server-side.
     res.json({
       orderId: order.id,
       amount: finalAmount,
@@ -135,7 +148,6 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
       planName: plan.name,
       couponApplied: appliedCouponCode,
       discount: plan.priceInr - finalAmount,
-      _couponId: couponId, // internal — used for redemption on verify
     });
   } catch (err) {
     logger.error({ err }, 'Failed to create Razorpay order');
@@ -143,7 +155,7 @@ router.post('/create-order', requireAuth, async (req: AuthenticatedRequest, res:
   }
 });
 
-// ── POST /api/payments/verify — Verify payment after checkout ───────
+// ── POST /api/payments/verify — Verify payment after checkout ───
 router.post('/verify', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
@@ -152,8 +164,16 @@ router.post('/verify', requireAuth, async (req: AuthenticatedRequest, res: Respo
       return res.status(400).json({ error: 'Missing payment verification fields' });
     }
 
-    // Verify signature
-    const secret = process.env.RAZORPAY_KEY_SECRET!;
+    // Guard: fail explicitly if secret is missing rather than accepting all signatures
+    let secret: string;
+    try {
+      secret = getRazorpaySecret();
+    } catch {
+      logger.error({}, 'RAZORPAY_KEY_SECRET not set — payment verification disabled');
+      return res.status(503).json({ error: 'Payment verification service is unavailable' });
+    }
+
+    // Verify HMAC signature
     const body = razorpay_order_id + '|' + razorpay_payment_id;
     const expectedSignature = crypto
       .createHmac('sha256', secret)
@@ -165,7 +185,7 @@ router.post('/verify', requireAuth, async (req: AuthenticatedRequest, res: Respo
       return res.status(400).json({ error: 'Payment verification failed — signature mismatch' });
     }
 
-    // Find the payment record
+    // Find the payment record — must belong to the requesting user
     const payment = await prisma.payment.findFirst({
       where: { razorpayOrderId: razorpay_order_id, userId: req.user!.id },
     });
@@ -196,7 +216,7 @@ router.post('/verify', requireAuth, async (req: AuthenticatedRequest, res: Respo
       }),
     ]);
 
-    // Redeem coupon if one was applied
+    // Redeem coupon if one was applied (non-fatal — payment is already confirmed)
     if (payment.couponCode) {
       try {
         const coupon = await prisma.coupon.findUnique({ where: { code: payment.couponCode } });

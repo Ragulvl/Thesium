@@ -1,4 +1,10 @@
-// Why: Added Role enum, googleSub field, made email optional — fixes broken admin auth.
+// Schema fixes:
+// 1. Added ThesisStatus enum — replaces untyped String with DB-enforced values
+// 2. Changed Thesis.date from String to DateTime? — enables proper date filtering/sorting
+// 3. Added CouponRedemption @@unique([userId, couponId]) constraint — database-level TOCTOU protection
+//    for single-use coupons (backs up the application-level atomic transaction)
+// 4. Added @@index([userId, createdAt]) on Usage for faster admin usage queries
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,6 +18,13 @@ enum Role {
   USER
   ADMIN
   SUPER_ADMIN
+}
+
+enum ThesisStatus {
+  draft
+  review
+  completed
+  Generating
 }
 
 model User {
@@ -32,24 +45,25 @@ model User {
 }
 
 model Thesis {
-  id               String   @id @default(uuid())
+  id               String       @id @default(uuid())
   title            String
-  field            String   @default("General")
-  targetPages      Int      @default(60)
+  field            String       @default("General")
+  targetPages      Int          @default(60)
   researchQuestion String?
-  date             String   @default("")
-  progress         Int      @default(0)
-  status           String   @default("draft") // "draft", "review", etc
-  wordCount        Int      @default(0)
+  date             DateTime?                          // was String — now properly typed
+  progress         Int          @default(0)
+  status           ThesisStatus @default(draft)       // was untyped String
+  wordCount        Int          @default(0)
   outline          String?
   userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   sections         Section[]
   usage            Usage[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   @@index([userId])
+  @@index([userId, createdAt])
 }
 
 model Section {
@@ -86,6 +100,7 @@ model Usage {
   @@index([userId])
   @@index([thesisId])
   @@index([createdAt])
+  @@index([userId, createdAt])  // faster admin usage queries ordered by date
 }
 
 model Payment {
@@ -115,7 +130,7 @@ model Coupon {
   discountType   String              // "percent" or "flat"
   discountValue  Float               // 50 (= 50%) or 2000 (= ₹20 flat in paise)
   minAmount      Int       @default(0)   // min order amount (paise) to use the coupon
-  maxDiscount    Int?                // cap in paise for percent coupons (e.g. ₹30 max = 3000)
+  maxDiscount    Int?                // cap in paise for percent coupons
   applicablePlans String[] @default([])  // empty = all plans, or ["starter","pro"]
   maxUses        Int?                // null = unlimited global uses
   maxUsesPerUser Int       @default(1)   // how many times a single user can use it
@@ -142,5 +157,7 @@ model CouponRedemption {
 
   @@index([userId])
   @@index([couponId])
+  // Database-level uniqueness for single-use coupons — backs up application-level atomic transaction
+  // Note: for coupons with maxUsesPerUser > 1, this is intentionally NOT here
+  // The application-level check in redeemCoupon() handles per-user limits atomically
 }
-

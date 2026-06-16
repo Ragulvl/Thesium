@@ -1,10 +1,27 @@
-// Why: Auth now resolves full DB user (with role), fixing Google sub vs Prisma id mismatch and enabling role-based access control.
+// Why: Auth now resolves full DB user (with role), fixing Google sub vs Prisma id mismatch
+// and enabling role-based access control.
+// Fix: Use GOOGLE_CLIENT_ID (server-side) with fallback to VITE_GOOGLE_CLIENT_ID.
+//      Removed 'dummy_client_id' fallback — a missing CLIENT_ID now fails fast.
 import { Request, Response, NextFunction } from 'express';
 import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../config/prisma.js';
 import { Role } from '@prisma/client';
 
-const CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || 'dummy_client_id';
+// Prefer the server-side GOOGLE_CLIENT_ID env var; fall back to the VITE_ variant
+// for projects that share a single variable. If neither is set, fail loudly.
+const CLIENT_ID =
+  process.env.GOOGLE_CLIENT_ID ||
+  process.env.VITE_GOOGLE_CLIENT_ID;
+
+if (!CLIENT_ID) {
+  process.stderr.write(
+    '❌ FATAL: Neither GOOGLE_CLIENT_ID nor VITE_GOOGLE_CLIENT_ID is set. ' +
+    'Google token verification will reject all requests.\n'
+  );
+  // Do not exit — allow server to start so health checks still respond,
+  // but every auth request will return 403.
+}
+
 const client = new OAuth2Client(CLIENT_ID);
 
 export interface AuthenticatedUser {
@@ -21,6 +38,10 @@ export interface AuthenticatedRequest extends Request {
 }
 
 export const requireAuth = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  if (!CLIENT_ID) {
+    return res.status(503).json({ error: 'Authentication service misconfigured' });
+  }
+
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -81,7 +102,7 @@ export const requireAuth = async (req: AuthenticatedRequest, res: Response, next
 
     next();
   } catch (error) {
-    req.log?.error({ err: error }, 'Token verification failed');
+    // Don't log the raw error object — it may contain token data
     return res.status(403).json({ error: 'Forbidden: Token verification failed' });
   }
 };

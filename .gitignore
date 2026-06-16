@@ -20,7 +20,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ── Environment files — NEVER commit real credentials ──────────────────
+# Use .env.example for the safe template. Copy and fill locally.
 .env
+.env.*
+!.env.example
 
 /src/generated/prisma
 typecheck_errors*.txt

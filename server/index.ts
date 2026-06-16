@@ -1,11 +1,15 @@
-// Why: Added Helmet, restricted CORS, body size limit, auth on jobs endpoint, global error handler, unified imports.
+// Fixes applied:
+// 1. Health check now tests actual DB and Redis connectivity (was always returning OK)
+// 2. Worker dynamic import has .catch() to surface load failures
+// 3. Graceful shutdown closes BullMQ queue before disconnecting Prisma
+// 4. validateEnv() imported from env.ts (single source of truth)
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { env } from './config/env.js';
+import { env, validateEnv } from './config/env.js';
 import { prisma } from './config/prisma.js';
+import redisClient from './config/redis.js';
 import { logger as baseLogger } from './config/logger.js';
-import { validateEnv } from './config/validateEnv.js';
 import { metricsMiddleware } from './middleware/metrics.js';
 import { requireAuth, AuthenticatedRequest } from './middleware/auth.js';
 import { generationQueue } from './services/queue.js';
@@ -16,13 +20,15 @@ import thesesRoutes from './routes/theses.routes.js';
 import sectionsRoutes from './routes/sections.routes.js';
 import usersRoutes from './routes/users.routes.js';
 import adminRoutes from './routes/admin.routes.js';
-
 import paymentRoutes from './routes/payment.routes.js';
 import couponRoutes from './routes/coupon.routes.js';
+import usageRoutes from './routes/usage.routes.js';
 
-// Import Worker (only when running as combined API+worker, not in Docker worker mode)
+// Import Worker (only in combined mode — not in dedicated Docker worker container)
 if (process.env.THESIUM_ROLE !== 'worker') {
-  import('./workers/generation.worker.js');
+  import('./workers/generation.worker.js').catch((err: unknown) => {
+    baseLogger.error({ err }, 'Failed to load generation worker — queue processing disabled');
+  });
 }
 
 // Validate environment before anything else
@@ -31,7 +37,7 @@ validateEnv();
 const app = express();
 
 // ── Security Middleware ──────────────────────────────────────────────
-const FRONTEND_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:10000').split(',');
+const FRONTEND_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:10000').split(',').map(o => o.trim());
 
 app.use(helmet({
   crossOriginOpenerPolicy: false,   // Required: Google Sign-In uses popup/iframe postMessage
@@ -54,7 +60,6 @@ app.use((req, res, next) => {
     const code = res.statusCode;
     const method = req.method;
 
-    // Only log: non-GET requests, or errors (4xx/5xx)
     if (method !== 'GET' || code >= 400) {
       const color = code >= 500 ? '\x1b[31m' : code >= 400 ? '\x1b[33m' : '\x1b[32m';
       console.log(
@@ -70,8 +75,35 @@ app.use((req, res, next) => {
 app.use(metricsMiddleware);
 
 // ── Health Check ─────────────────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', database: 'connected', backgroundWorkers: 'active' });
+// Tests actual database and Redis connectivity — not a static response.
+app.get('/api/health', async (_req, res) => {
+  const checks: Record<string, 'ok' | 'error'> = {
+    database: 'error',
+    redis: 'error',
+  };
+
+  // Test database
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    checks.database = 'ok';
+  } catch {
+    baseLogger.warn('Health check: database unreachable');
+  }
+
+  // Test Redis
+  try {
+    await redisClient.ping();
+    checks.redis = 'ok';
+  } catch {
+    baseLogger.warn('Health check: Redis unreachable');
+  }
+
+  const allOk = Object.values(checks).every(v => v === 'ok');
+  return res.status(allOk ? 200 : 503).json({
+    status: allOk ? 'ok' : 'degraded',
+    ...checks,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ── API Routes ───────────────────────────────────────────────────────
@@ -79,9 +111,9 @@ app.use('/api/users', usersRoutes);
 app.use('/api/theses', thesesRoutes);
 app.use('/api/theses', sectionsRoutes);
 app.use('/api/admin', adminRoutes);
-
 app.use('/api/payments', paymentRoutes);
 app.use('/api/coupons', couponRoutes);
+app.use('/api/usage', usageRoutes);
 
 // ── Bull Board Dashboard (Super Admin only) ──────────────────────────
 app.use('/admin/queues', requireAuth, (req: AuthenticatedRequest, res, next) => {
@@ -98,12 +130,17 @@ app.get('/api/jobs/:jobId', requireAuth, async (req: AuthenticatedRequest, res) 
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
   }
-  // Ownership check: job data must contain the requesting user's thesis
+  // Ownership check: job data must contain the requesting user's userId
   if (job.data?.userId && job.data.userId !== req.user!.id) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   const state = await job.getState();
-  return res.json({ id: job.id, state, returnvalue: job.returnvalue, failedReason: job.failedReason });
+  return res.json({
+    id: job.id,
+    state,
+    returnvalue: state === 'completed' ? job.returnvalue : undefined,
+    failedReason: state === 'failed' ? job.failedReason : undefined,
+  });
 });
 
 // ── Global Error Handler ─────────────────────────────────────────────
@@ -141,9 +178,29 @@ async function bootstrap() {
 bootstrap();
 
 // ── Graceful Shutdown ────────────────────────────────────────────────
+let shuttingDown = false;
+
 const shutdown = async (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   baseLogger.info(`${signal} received: shutting down gracefully`);
-  await prisma.$disconnect();
+
+  try {
+    // Close BullMQ queue first (stops accepting new jobs)
+    await generationQueue.close();
+    baseLogger.info('BullMQ queue closed');
+  } catch (err) {
+    baseLogger.warn({ err }, 'Failed to close BullMQ queue cleanly');
+  }
+
+  try {
+    await prisma.$disconnect();
+    baseLogger.info('Prisma disconnected');
+  } catch (err) {
+    baseLogger.warn({ err }, 'Failed to disconnect Prisma cleanly');
+  }
+
   process.exit(0);
 };
 

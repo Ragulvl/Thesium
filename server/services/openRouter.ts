@@ -79,6 +79,7 @@ export interface LLMCallResult {
   content: string;
   durationMs: number;
   estimatedCostUsd: number;
+  totalTokens: number;  // actual token count from OpenRouter response
 }
 
 /**
@@ -138,6 +139,7 @@ export async function callModelWithRetry(
       content: response.choices[0]?.message?.content || "",
       durationMs: Date.now() - start,
       estimatedCostUsd,
+      totalTokens,
     };
   } catch (error) {
     callLogger.error({ err: error, model }, "All OpenRouter retry attempts failed");
