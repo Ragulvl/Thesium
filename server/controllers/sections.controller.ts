@@ -205,3 +205,72 @@ export const queueAllSections = async (req: AuthenticatedRequest, res: Response)
     return res.status(500).json({ error: 'Failed to queue sections' });
   }
 };
+
+/**
+ * Queue a whole-thesis audit job.
+ * Only allowed when at least 2 sections have content (>100 words each).
+ * Returns the jobId for polling via /api/jobs/:jobId.
+ */
+export const queueThesisAudit = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const thesisId = req.params.thesisId as string;
+
+    const thesis = await prisma.thesis.findUnique({
+      where: { id: thesisId },
+      include: { sections: { select: { id: true, wordCount: true } } },
+    });
+
+    if (!thesis) return res.status(404).json({ error: 'Thesis not found' });
+    if (thesis.userId !== req.user!.id) return res.status(403).json({ error: 'Forbidden' });
+
+    // Need at least 2 sections with real content to audit
+    const writtenCount = thesis.sections.filter(s => (s.wordCount ?? 0) > 100).length;
+    if (writtenCount < 2) {
+      return res.status(400).json({
+        error: 'Not enough written sections to audit. Generate at least 2 sections first.',
+        writtenCount,
+      });
+    }
+
+    const jobId = `audit-${thesisId}-${Date.now()}`;
+    await generationQueue.add('audit-thesis', {
+      thesisId,
+      userId: req.user!.id,
+    }, {
+      jobId,
+      attempts: 1,           // Audits don't retry — they're expensive
+      removeOnComplete: true,
+      removeOnFail: false,
+    });
+
+    logger.info(`Thesis audit queued for ${thesisId} (job ${jobId})`);
+    return res.status(202).json({ message: 'Audit queued', jobId });
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to queue thesis audit');
+    return res.status(500).json({ error: 'Failed to queue audit' });
+  }
+};
+
+/**
+ * Fetch the stored audit report for a thesis.
+ * Returns 404 if no audit has been run yet.
+ */
+export const getThesisAuditReport = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const thesisId = req.params.thesisId as string;
+
+    const thesis = await prisma.thesis.findUnique({
+      where: { id: thesisId },
+      select: { userId: true, auditReport: true },
+    });
+
+    if (!thesis) return res.status(404).json({ error: 'Thesis not found' });
+    if (thesis.userId !== req.user!.id) return res.status(403).json({ error: 'Forbidden' });
+    if (!thesis.auditReport) return res.status(404).json({ error: 'No audit report found. Run an audit first.' });
+
+    return res.json(thesis.auditReport);
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to fetch audit report');
+    return res.status(500).json({ error: 'Failed to fetch audit report' });
+  }
+};

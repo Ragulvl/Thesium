@@ -55,6 +55,8 @@ model Thesis {
   status           ThesisStatus @default(draft)       // was untyped String
   wordCount        Int          @default(0)
   outline          String?
+  blueprint        Json?                              // Thesis Blueprint (once per thesis)
+  auditReport      Json?                              // Whole-Thesis Audit result
   userId           String
   user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   sections         Section[]

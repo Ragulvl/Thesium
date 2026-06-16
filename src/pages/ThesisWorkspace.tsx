@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BookOpen, Download, Sparkles, Check,
   ChevronRight, AlignLeft, Menu, X,
-  FileText, BarChart3, Loader2
+  FileText, BarChart3, Loader2, ShieldCheck
 } from 'lucide-react';
 import Button from '../components/ui/Button';
 import ExportModal from '../components/ui/ExportModal';
@@ -23,6 +23,24 @@ interface ThesisData {
   title: string;
   field: string;
   targetPages: number;
+  auditReport?: AuditReport | null;
+}
+
+interface AuditIssue {
+  category: string;
+  severity: 'high' | 'medium' | 'low';
+  description: string;
+  affectedSections: string[];
+  suggestion: string;
+}
+
+interface AuditReport {
+  generatedAt: string;
+  overallScore: 'excellent' | 'good' | 'fair' | 'poor';
+  issues: AuditIssue[];
+  strengths: string[];
+  wordCountBalance: Record<string, number>;
+  summary: string;
 }
 
 export default function ThesisWorkspace() {
@@ -38,6 +56,8 @@ export default function ThesisWorkspace() {
   const [exportOpen, setExportOpen] = useState(false);
   const [generating, setGenerating] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
+  const [auditRunning, setAuditRunning] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const autoGenTriggered = useRef(false);
 
@@ -75,6 +95,13 @@ export default function ThesisWorkspace() {
             content: s.content ?? '',
           })));
           setActiveId(secData[0].id);
+        }
+
+        // Load existing audit report if one was previously run
+        const auditRes = await fetch(`/api/theses/${thesisId}/audit`, { headers });
+        if (auditRes.ok) {
+          const report = await auditRes.json();
+          setAuditReport(report);
         }
       } catch (e) {
         logger.error({ err: e }, 'Failed to load workspace');
@@ -256,6 +283,41 @@ export default function ThesisWorkspace() {
     }
   };
 
+  // ── Run Whole-Thesis Audit ──
+  const handleRunAudit = async () => {
+    if (!thesisId || auditRunning) return;
+    setAuditRunning(true);
+    try {
+      // 1. Queue the audit job
+      const res = await fetch(`/api/theses/${thesisId}/audit`, {
+        method: 'POST',
+        headers: getHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Failed to start audit');
+      }
+      const { jobId } = await res.json();
+
+      // 2. Poll job status (reuse existing poller — audit can take 60-120s)
+      const result = await pollJobUntilDone(jobId);
+      if (result === 'failed') { showError('Audit failed. Please try again.', 'Error'); return; }
+      if (result === 'timeout') { showError('Audit timed out. Try again shortly.', 'Timeout'); return; }
+
+      // 3. Fetch the stored report
+      const reportRes = await fetch(`/api/theses/${thesisId}/audit`, { headers: getHeaders() });
+      if (!reportRes.ok) throw new Error('Failed to fetch audit report');
+      const report = await reportRes.json();
+      setAuditReport(report);
+      success('Thesis audit complete!', 'Audit Done');
+    } catch (err: any) {
+      logger.error({ err }, 'Audit failed');
+      showError(err.message || 'Audit failed', 'Error');
+    } finally {
+      setAuditRunning(false);
+    }
+  };
+
   // ── Loading state ──
   if (loading) {
     return (
@@ -392,6 +454,22 @@ export default function ThesisWorkspace() {
             )}
           </Button>
 
+          {/* Audit button — enabled when ≥2 sections have content */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRunAudit}
+            className="ml-2 font-semibold"
+            disabled={isAnyGenerating || auditRunning || doneCount < 2}
+            title={doneCount < 2 ? 'Generate at least 2 sections to enable audit' : 'Run whole-thesis quality audit'}
+          >
+            {auditRunning ? (
+              <><Loader2 size={13} className="mr-1.5 animate-spin" /> Auditing...</>
+            ) : (
+              <><ShieldCheck size={13} className="mr-1.5" /> Audit</>
+            )}
+          </Button>
+
           <Button variant="outline" size="sm" onClick={() => setExportOpen(true)} className="ml-2 font-semibold">
             <Download size={13} className="mr-1.5" />
             Export
@@ -496,7 +574,9 @@ export default function ThesisWorkspace() {
           {doneCount === sections.length && sections.length > 0 && (
             <div className="p-3 bg-teal-50 dark:bg-teal-500/10 border border-teal-200 dark:border-teal-500/20 rounded-lg">
               <p className="text-xs font-bold text-teal-800 dark:text-teal-400">✓ All sections complete</p>
-              <p className="text-[11px] text-teal-600 dark:text-teal-500/80 mt-0.5">Ready for editing and export.</p>
+              <p className="text-[11px] text-teal-600 dark:text-teal-500/80 mt-0.5">
+                {auditReport ? 'Audit ran — see report below.' : 'Click “Audit” to run a full quality check.'}
+              </p>
             </div>
           )}
         </div>
@@ -541,6 +621,59 @@ export default function ThesisWorkspace() {
             </button>
           ))}
         </div>
+
+        {/* ── Audit Report Panel ── */}
+        {auditReport && (
+          <div className="p-5 border-t border-border">
+            <div className="flex items-center justify-between mb-2.5">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold flex items-center gap-1.5">
+                <ShieldCheck size={10} /> Thesis Audit
+              </p>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded capitalize ${
+                auditReport.overallScore === 'excellent' ? 'bg-teal-100 text-teal-700 dark:bg-teal-500/20 dark:text-teal-400' :
+                auditReport.overallScore === 'good'      ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400' :
+                auditReport.overallScore === 'fair'      ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400' :
+                                                           'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400'
+              }`}>
+                {auditReport.overallScore}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground mb-3 leading-relaxed">{auditReport.summary}</p>
+            {auditReport.issues.length === 0 ? (
+              <div className="p-2 bg-teal-50 dark:bg-teal-500/10 border border-teal-200 dark:border-teal-500/20 rounded-lg">
+                <p className="text-[11px] font-semibold text-teal-700 dark:text-teal-400">✓ No issues found</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {auditReport.issues.slice(0, 4).map((issue, i) => (
+                  <div key={i} className={`p-2 rounded-lg border ${
+                    issue.severity === 'high'   ? 'bg-red-50 border-red-200 dark:bg-red-500/10 dark:border-red-500/20' :
+                    issue.severity === 'medium' ? 'bg-amber-50 border-amber-200 dark:bg-amber-500/10 dark:border-amber-500/20' :
+                                                  'bg-blue-50 border-blue-200 dark:bg-blue-500/10 dark:border-blue-500/20'
+                  }`}>
+                    <p className="text-[10px] font-bold uppercase tracking-wide mb-0.5 capitalize">
+                      {issue.category} &middot; {issue.severity}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">{issue.description}</p>
+                    {issue.suggestion && (
+                      <p className="text-[10px] font-medium text-foreground/70 mt-1 italic">{issue.suggestion}</p>
+                    )}
+                  </div>
+                ))}
+                {auditReport.issues.length > 4 && (
+                  <p className="text-[10px] text-muted-foreground text-center">+{auditReport.issues.length - 4} more issues</p>
+                )}
+              </div>
+            )}
+            <button
+              onClick={handleRunAudit}
+              disabled={auditRunning}
+              className="mt-3 w-full text-[10px] font-semibold text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            >
+              {auditRunning ? 'Running audit…' : 'Re-run audit'}
+            </button>
+          </div>
+        )}
       </aside>
 
       <ExportModal isOpen={exportOpen} onClose={() => setExportOpen(false)} thesisTitle={topic} thesisId={thesisId} />
