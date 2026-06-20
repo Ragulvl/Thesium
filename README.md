@@ -126,6 +126,21 @@ src/
 └── utils/           # Frontend utilities
 ```
 
+### AI Generation Pipeline
+
+`server/services/pipeline.ts` runs a **7-stage pipeline** per thesis section (plus an optional 8th Image stage):
+
+| Stage | Name | Scope | Description |
+|-------|------|-------|-------------|
+| 0 | **Blueprint** | Once per thesis | Generates research questions, key arguments, methodology and citation strategy. Injected into every Draft for consistency. |
+| 1 | **Outline** | Once per section | Produces 3–6 subsection titles via LLM. |
+| 2 | **Research** | Per subsection | Fetches relevant academic papers from Semantic Scholar (API only, no LLM). |
+| 3 | **Draft** | Per subsection | Writes the subsection with blueprint context + paper evidence injected. |
+| 4 | **Citation Validation** | Per subsection | Fast LLM check that every in-text citation maps to a fetched paper. Skipped when no papers were found. |
+| 5 | **Review** | Per subsection | Large LLM fixes consistency, originality, and any citation issues raised in stage 4. |
+| 6 | **Polish** | Per subsection | Medium LLM corrects grammar/tone and extracts a structured memory object for subsequent subsections. |
+| 7 | **Image** *(optional)* | Per subsection | Generates an SVG diagram. Skipped for title, table of contents, and references sections. |
+
 ## CI/CD
 
 GitHub Actions runs on every push/PR to `main`:

@@ -1,16 +1,20 @@
-// Pipeline v3 — 4 targeted quality upgrades over v2:
+// Pipeline v3 — 7-stage AI generation pipeline (+ optional Image stage)
 //
-//  1. Thesis Blueprint   (once per thesis) — research questions, key arguments,
-//                         methodology, citation strategy. Injected into every Draft.
-//  2. Citation Validation (per subsection, only when papers found) — FAST model
-//                         checks that every in-text citation maps to a real paper.
-//                         Issues are forwarded to Review for correction.
-//  3. Structured Memory  (replaces flat summary strings) — Polish now extracts
-//                         JSON {summary, keyFindings, definitions, importantClaims,
-//                         methodologyNotes}. Subsequent subsections get richer context.
-//  4. Whole-Thesis Audit — separate job type handled by thesisAuditor.ts.
+// Stages executed once per thesis:
+//  Stage 0 — Blueprint: research questions, key arguments, methodology,
+//             citation strategy. Injected into every Draft for consistency.
 //
-// Net cost increase: ~10-15% tokens. Quality improvement: ~30-50%.
+// Stages executed per section (per subsection within each section):
+//  Stage 1 — Outline:             Generate 3-6 subsection titles (1 LLM call per section)
+//  Stage 2 — Research:            Semantic Scholar fetch (API, no LLM)
+//  Stage 3 — Draft:               Write with blueprint context + evidence (1 LLM)
+//  Stage 4 — Citation Validation: Check every in-text citation maps to a real paper
+//                                 (1 LLM, FAST model, skipped if no papers found)
+//  Stage 5 — Review:              Fix consistency, originality, citation issues (1 LLM)
+//  Stage 6 — Polish:              Grammar/tone + Structured Memory extraction (1 LLM)
+//  Stage 7 — Image (optional):    SVG diagram per subsection (1 LLM, FAST, selective)
+//
+// Net cost increase over v2: ~10-15% tokens. Quality improvement: ~30-50%.
 
 import { prisma } from '../config/prisma.js';
 import { aiRouter } from './ai/index.js';
@@ -256,18 +260,22 @@ RULES:
 // ── Main Pipeline ────────────────────────────────────────────────────
 
 /**
- * Pipeline v3: Blueprint + CitationValidation + StructuredMemory
+ * Pipeline v3: 7-stage generation (Blueprint + Outline + Research + Draft +
+ * Citation Validation + Review + Polish) with optional Image stage.
+ *
+ * Once per thesis:
+ *   Stage 0: Blueprint   — research questions, arguments, methodology (1 LLM, global)
  *
  * Per section:
- *   Step 0: Section outline (1 LLM call, runs once per section)
+ *   Stage 1: Outline     — 3-6 subsection titles (1 LLM call per section)
  *
  * Per subsection:
- *   Stage 1: Research    — Semantic Scholar fetch (API, no LLM)
- *   Stage 2: Draft       — Write with blueprint context + evidence (1 LLM)
- *   Stage 2.5: Cite Val  — Check citations against papers (1 LLM, FAST, skipped if no papers)
- *   Stage 3: Review      — Fix consistency + citation issues (1 LLM)
- *   Stage 4: Polish      — Grammar + Structured Memory extraction (1 LLM)
- *   Stage 5: Image       — SVG diagram (1 LLM, FAST, selective)
+ *   Stage 2: Research    — Semantic Scholar fetch (API, no LLM)
+ *   Stage 3: Draft       — Write with blueprint context + evidence (1 LLM)
+ *   Stage 4: Cite Val    — Check citations against papers (1 LLM, FAST, skipped if no papers)
+ *   Stage 5: Review      — Fix consistency + citation issues (1 LLM)
+ *   Stage 6: Polish      — Grammar + Structured Memory extraction (1 LLM)
+ *   Stage 7: Image       — SVG diagram (1 LLM, FAST, selective — skipped for title/toc/references)
  */
 export async function runAIPipeline(thesisId: string, sectionId: string, job: any, logger: any) {
   const costTracker = new CostTracker(MAX_JOB_COST_USD);
