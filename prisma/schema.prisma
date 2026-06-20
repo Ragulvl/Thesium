@@ -1,8 +1,9 @@
 // Schema fixes:
 // 1. Added ThesisStatus enum — replaces untyped String with DB-enforced values
 // 2. Changed Thesis.date from String to DateTime? — enables proper date filtering/sorting
-// 3. Added CouponRedemption @@unique([userId, couponId]) constraint — database-level TOCTOU protection
-//    for single-use coupons (backs up the application-level atomic transaction)
+// 3. CouponRedemption: @@unique([userId, couponId]) intentionally omitted — race-condition
+//    protection is handled at the application layer via Prisma transactions, since
+//    maxUsesPerUser > 1 requires multiple redemptions per user/coupon pair.
 // 4. Added @@index([userId, createdAt]) on Usage for faster admin usage queries
 
 generator client {
@@ -163,7 +164,8 @@ model CouponRedemption {
 
   @@index([userId])
   @@index([couponId])
-  // Database-level uniqueness for single-use coupons — backs up application-level atomic transaction
-  // Note: for coupons with maxUsesPerUser > 1, this is intentionally NOT here
-  // The application-level check in redeemCoupon() handles per-user limits atomically
+  // @@unique([userId, couponId]) intentionally omitted — race-condition protection is handled
+  // at the application layer via Prisma transactions (see redeemCoupon() in coupon.controller.ts).
+  // A database-level unique constraint would block coupons where maxUsesPerUser > 1, which
+  // legitimately requires multiple CouponRedemption rows per user/coupon pair.
 }
